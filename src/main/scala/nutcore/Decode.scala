@@ -20,6 +20,8 @@ import chisel3._
 import chisel3.util._
 
 trait HasInstrType {
+  def N = false.B
+  def Y = true.B
   def InstrN  = "b0000".U
   def InstrI  = "b0100".U
   def InstrIZ = "b1100".U
@@ -35,7 +37,7 @@ trait HasInstrType {
   def InstrPM = "b10110".U
   def InstrPB = "b10111".U
   def InstrPRD= "b11100".U
-
+  def InstrR4 = "b11110".U
   def isrfWen(instrType : UInt): Bool = instrType(2)
 }
 
@@ -53,14 +55,14 @@ trait HasInstrType {
 // }
 
 object SrcType {
-  def reg = "b0".U
-  def pc  = "b1".U
-  def imm = "b1".U
+  def reg = "b00".U
+  def pc  = "b01".U
+  def imm = "b01".U
   def apply() = UInt(1.W)
 }
 
 object FuType extends HasNutCoreConst {
-  def num = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM
+  def num = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + 4
   def width = 4
   def aluint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM}else{0}
   def alu = aluint.U(width.W)
@@ -72,13 +74,22 @@ object FuType extends HasNutCoreConst {
   def mdu = mduint.U(width.W)
   def csrint = 1
   def csr = csrint.U(width.W)
-  def mou = "b1000".U
+  def mou = "b1100".U
   def bruint = if(Polaris_Independent_Bru == 1){0}else{alu1int}
   def bru = bruint.U(width.W)
   def simdu = simduint.U(width.W)
   def simduint = if(Polaris_SIMDU_WAY_NUM != 0){if(Polaris_Independent_Bru == 1){2}else{3}}else{0}
   def simdu1 = simdu1int.U(width.W)
   def simdu1int = if(Polaris_SIMDU_WAY_NUM != 0){if(Polaris_Independent_Bru == 1){3}else{4}}else{0}
+  //fpu
+  def fma = fmaint.U(width.W)
+  def fmaint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 2}else{5+Polaris_SIMDU_WAY_NUM}
+  def fdivsqrt = fdivsqrtint.U(width.W)
+  def fdivsqrtint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 3}else{6+Polaris_SIMDU_WAY_NUM}
+  def fconv = fconvint.U(width.W)
+  def fconvint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 4}else{7+Polaris_SIMDU_WAY_NUM}
+  def fcomp = fcompint.U(width.W)
+  def fcompint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 5}else{8+Polaris_SIMDU_WAY_NUM}
   def apply() = UInt(width.W)
 }
 
@@ -101,7 +112,8 @@ object Instructions extends HasInstrType with HasNutCoreParameter {
     RVPIInstr.table ++
     RVPMInstr.table ++
     RVPBInstr.table ++
-    RVPRDInstr.table 
+    RVPRDInstr.table ++
+    RVFInstr.table
     }else Nil)
 }
 
@@ -110,4 +122,9 @@ object CInstructions extends HasInstrType with HasNutCoreParameter{
   val DecodeDefault = List(RVCInstr.ImmNone, RVCInstr.DtCare, RVCInstr.DtCare, RVCInstr.DtCare)
   // val DecodeDefault = List(InstrN, FuType.csr, CSROpType.jmp)
   def CExtraDecodeTable = RVCInstr.cExtraTable
+}
+
+object FInstructions extends HasInstrType{
+  val DecodeDefault = List(N, N, N, N)
+  def FExtraDecodeTable = RVFInstr.FExtraTable
 }

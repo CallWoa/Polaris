@@ -62,6 +62,7 @@ class Backend_ooo(implicit val p: NutCoreConfig) extends NutCoreModule with HasR
 
   val cdb = Wire(Vec(CommitWidth, Valid(new OOCommitIO)))
   val rf = new RegFile
+  val FloatRegFile = new RegFile
   val rob = Module(new ROB)
 
   val brurs  = Module(new RS(priority = true, size = checkpointSize, checkpoint = true, name = "BRURS"))
@@ -88,8 +89,16 @@ class Backend_ooo(implicit val p: NutCoreConfig) extends NutCoreModule with HasR
   rob.io.cdb <> cdb
   rob.io.mispredictRec := mispredictRec
   rob.io.flush := flushBackend
-  when (rob.io.wb(0).rfWen) { rf.write(rob.io.wb(0).rfDest, rob.io.wb(0).rfData) }
-  when (rob.io.wb(1).rfWen) { rf.write(rob.io.wb(1).rfDest, rob.io.wb(1).rfData) }
+
+  when (rob.io.wb(0).rfWen ) { 
+    when(rob.io.wb(0).toFReg){FloatRegFile.write(rob.io.wb(0).rfDest, rob.io.wb(0).rfData)}
+    .otherwise{rf.write(rob.io.wb(0).rfDest, rob.io.wb(0).rfData)}
+  }
+  when (rob.io.wb(1).rfWen) { 
+    when(rob.io.wb(1).toFReg){FloatRegFile.write(rob.io.wb(1).rfDest, rob.io.wb(1).rfData)}
+    .otherwise{rf.write(rob.io.wb(1).rfDest, rob.io.wb(1).rfData)}
+  }
+  
   List.tabulate(DispatchWidth)(i => {
     rob.io.in(i).valid := io.in(i).valid && instCango(i)
     io.in(i).ready := rob.io.in(i).ready && instCango(i)
@@ -145,9 +154,7 @@ class Backend_ooo(implicit val p: NutCoreConfig) extends NutCoreModule with HasR
     inst(i).src2Rdy := !rob.io.rvalid(2*i+1) || rob.io.rcommited(2*i+1)
     inst(i).brMask := DontCare
     // read rf, update src
-    inst(i).decode.data.src1 := rf.read(rfSrc(2*i)) 
     when(rob.io.rvalid(2*i) && rob.io.rcommited(2*i)){inst(i).decode.data.src1 := rob.io.rprf(2*i)}
-    inst(i).decode.data.src2 := rf.read(rfSrc(2*i + 1)) 
     when(rob.io.rvalid(2*i+1) && rob.io.rcommited(2*i+1)){inst(i).decode.data.src2 := rob.io.rprf(2*i+1)}
   })
   inst(DispatchWidth) := DontCare
@@ -681,7 +688,7 @@ class Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
   val exu  = Module(new SIMD_EXU)
   val wbu  = Module(new SIMD_WBU)
 
-  wbu.io.in :=DontCare
+  wbu.io.in := DontCare
 
   PipelineConnect(isu.io.out(0), exu.io.in(0), exu.io.out(0).fire(), io.flush(0))
   PipelineConnect(exu.io.out(0), wbu.io.in(0), true.B, io.flush(1))
@@ -725,7 +732,7 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
   val exu  = Module(new new_SIMD_EXU)
   val wbu  = Module(new new_SIMD_WBU)
 
-  wbu.io.in :=DontCare
+  wbu.io.in := DontCare
 
   //connect isu and exu : issue-way to FuType.num-way
   val exu_bits_next = Wire(Vec(FuType.num,new DecodeIO))
@@ -863,7 +870,9 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
                                             match_exuwbu(i)(k)
                                             }}).reduce(_||_)
       val front_wbu_matched = {if(i == 0){true.B}else{match_exuwbu(i-1).reduce(_||_)}}
-      when(Mux((i+1).U <= ptrleft,exu.io.out(j).bits.decode.InstNo === (TailPtr +& i.U),exu.io.out(j).bits.decode.InstNo +& ptrleft === i.U) && (if(p.FPGAPlatform){exu.io.out(j).valid}else{true.B}) && front_wbu_matched && !wbu_matched){
+      when(Mux((i+1).U <= ptrleft,
+        exu.io.out(j).bits.decode.InstNo === (TailPtr +& i.U),
+        exu.io.out(j).bits.decode.InstNo +& ptrleft === i.U) && (if(p.FPGAPlatform){exu.io.out(j).valid}else{true.B}) && front_wbu_matched && !wbu_matched){
         if(p.FPGAPlatform){
           exu.io.out(j).ready := true.B
           wbu_bits_next(i) := exu.io.out(j).bits
@@ -871,13 +880,16 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
           match_exuwbu(i)(j) := true.B
         }else{
           exu.io.out(j).ready := true.B
+          Debug("!!!EXU To WBU!!! j %x exu.io.out(j).valid %x\n", j.U, exu.io.out(j).valid)
           when(exu.io.out(j).valid){
             wbu_bits_next(i) := exu.io.out(j).bits
             wbu_valid_next(i) := true.B
             match_exuwbu(i)(j) := true.B
+            Debug("!!!EXU To WBU Success!!!\n")
           }
         }
       }
+      Debug("i %x j %x ptrleft %x TailPtr %x front_wbu_matched %x wbu_matched %x (i+1).U <= ptrleft %x exu.io.out(j).bits.decode.InstNo === (TailPtr +& i.U) %x exu.io.out(j).bits.decode.InstNo +& ptrleft === i.U) %x\n", i.U, j.U, ptrleft, TailPtr, front_wbu_matched, wbu_matched, (i+1).U <= ptrleft, exu.io.out(j).bits.decode.InstNo === (TailPtr +& i.U), exu.io.out(j).bits.decode.InstNo +& ptrleft === i.U)
     }
   }
   if(p.FPGAPlatform){
@@ -919,6 +931,7 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
 
   for(i <- 0 to Commit_num-1){
     isu.io.wb.rfWen(i) := wbu.io.wb.rfWen(i)
+    isu.io.wb.toFReg(i) := wbu.io.wb.toFReg(i)
     isu.io.wb.rfDest(i):= wbu.io.wb.rfDest(i)
     isu.io.wb.WriteData(i):=wbu.io.wb.WriteData(i)
     isu.io.wb.valid(i):=wbu.io.wb.valid(i)
@@ -927,14 +940,17 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
   for(i <- 0 to Issue_Num-1){
     isu.io.wb.ReadData1(i):=wbu.io.wb.ReadData1(i)
     isu.io.wb.ReadData2(i):=wbu.io.wb.ReadData2(i)
+    isu.io.wb.ReadData3(i):=wbu.io.wb.ReadData3(i)
     wbu.io.wb.rfSrc1(i):=isu.io.wb.rfSrc1(i)
     wbu.io.wb.rfSrc2(i):=isu.io.wb.rfSrc2(i)
-    isu.io.wb.ReadData3(i):= DontCare
-    wbu.io.wb.rfSrc3(i):= DontCare
-    if(Polaris_SIMDU_WAY_NUM!=0){
-      isu.io.wb.ReadData3(i):=wbu.io.wb.ReadData3(i)
-      wbu.io.wb.rfSrc3(i):=isu.io.wb.rfSrc3(i)
-    }
+    wbu.io.wb.rfSrc3(i):=isu.io.wb.rfSrc3(i)
+    wbu.io.wb.src1fpRen(i):=isu.io.wb.src1fpRen(i)
+    wbu.io.wb.src2fpRen(i):=isu.io.wb.src2fpRen(i)
+    wbu.io.wb.src3fpRen(i):=isu.io.wb.src3fpRen(i)
+//    if(Polaris_SIMDU_WAY_NUM!=0){
+//      isu.io.wb.ReadData3(i):=wbu.io.wb.ReadData3(i)
+//      wbu.io.wb.rfSrc3(i):=isu.io.wb.rfSrc3(i)
+//    }
   }
   val redirect = WireInit(exu.io.out(redirct_index).bits.decode.cf.redirect)
   redirect.valid := exu.io.out(redirct_index).bits.decode.cf.redirect.valid && exu.io.out(redirct_index).fire()
@@ -944,6 +960,10 @@ class new_Backend_inorder(implicit val p: NutCoreConfig) extends NutCoreModule {
   isu.io.forward(1+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.alu1int)  
   isu.io.forward(2+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.lsuint)  
   isu.io.forward(3+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.mduint)
+  isu.io.forward(4+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.fmaint)
+  isu.io.forward(5+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.fdivsqrtint)
+  isu.io.forward(6+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.fconvint)
+  isu.io.forward(7+Polaris_SIMDU_WAY_NUM) <> exu.io.forward(FuType.fcompint)
   if(Polaris_SIMDU_WAY_NUM>0){
     isu.io.forward(0) <> exu.io.forward(FuType.simduint)  
   }

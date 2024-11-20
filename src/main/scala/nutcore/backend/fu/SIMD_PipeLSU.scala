@@ -369,7 +369,7 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
     BoringUtils.addSink(lr, "lr")
     BoringUtils.addSink(lrAddr, "lr_addr")
 
-    val scInvalid = !(src1 === lrAddr && lr) && scReq
+    val scInvalid = !(src1 === lrAddr) && scReq
     Debug("setLr %x setLrVal %x setLrAddr %x lr %x lrAddr %x src1 %x\n",setLr,setLrVal,setLrAddr,lr,lrAddr,src1)
 
     // PF signal from TLB
@@ -495,7 +495,7 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
   Debug("[LSU-AGU] state %x atomReq %x func %x outvalid %x exec_finish %x\n", state, atomReq, func,io.out.valid,exec_finish)
 
     //Set LR/SC bits
-    setLr := io.out.fire() && (lrReq || scReq) && !(io.out.bits.storePF || io.out.bits.loadPF || io.out.bits.loadAddrMisaligned || io.out.bits.storeAddrMisaligned)
+    setLr := io.out.fire() && (lrReq || scReq)
     setLrVal := lrReq
     setLrAddr := src1
 
@@ -641,11 +641,12 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
 
 class pipeline_lsu_atom extends NutCoreModule with HasLSUConst {
   val io = IO(new new_SIMD_LSU_IO)
-  val (valid, src1, src2, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.func)
+  val (valid, src1, src2, src3, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.src3, io.in.bits.func)
   def access(valid: Bool, src1: UInt, src2: UInt, func: UInt): UInt = {
     this.valid := valid
     this.src1 := src1
     this.src2 := src2
+    this.src3 := DontCare
     this.func := func
     io.out.bits
   }

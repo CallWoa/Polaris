@@ -90,6 +90,7 @@ class ROB(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType
   // Currently, ROB is also used as lsroq when out of order store is enabled
   val load = RegInit(VecInit(List.fill(robSize)(VecInit(List.fill(robWidth)(false.B)))))
   val store = RegInit(VecInit(List.fill(robSize)(VecInit(List.fill(robWidth)(false.B)))))
+  val toFReg = RegInit(VecInit(List.fill(robSize)(VecInit(List.fill(robWidth)(false.B)))))
 
   // Almost all int/exceptions can be detected at decode stage, excepting for load/store related exception.
   // In NutCore-Argo's backend, non-l/s int/exc will be sent dircetly to CSR when dispatch,
@@ -507,8 +508,8 @@ class ROB(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType
       difftest_commit.io.instr    := RegNext(decode(ringBufferTail)(i).cf.instr)
       difftest_commit.io.skip     := RegNext(isMMIO(ringBufferTail)(i) && valid(ringBufferTail)(i))
       difftest_commit.io.isRVC    := RegNext(decode(ringBufferTail)(i).cf.isRVC)
-      difftest_commit.io.rfwen    := RegNext(io.wb(i).rfWen && io.wb(i).rfDest =/= 0.U) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
-      difftest_commit.io.fpwen    := false.B
+      //difftest_commit.io.rfwen    := RegNext(io.wb(i).rfWen && io.wb(i).rfDest =/= 0.U) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
+      //difftest_commit.io.fpwen    := false.B
       // difftest.io.wdata    := RegNext(io.wb(i).rfData)
       difftest_commit.io.wdest    := RegNext(io.wb(i).rfDest)
       difftest_commit.io.wpdest   := RegNext(io.wb(i).rfDest)

@@ -14,6 +14,9 @@ class SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with HasRegF
   })
 
   val rf = new RegFile
+  val floatRegFile = new RegFile
+  val src1FromFloatRegFile = Wire(Vec(Issue_Num, Bool()))
+  val src2FromFloatRegFile = Wire(Vec(Issue_Num, Bool()))
 
   def WAW(index:Int):Bool={
       val WaW = Wire(Vec(Issue_Num,Bool()))
@@ -24,16 +27,22 @@ class SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with HasRegF
       WaW.reduce(_||_)
   }
   for(i <- 0 to Issue_Num-1){
-  io.wb.rfWen(i) := io.in(i).bits.decode.ctrl.rfWen && io.in(i).valid && !WAW(i)
-  io.wb.rfDest(i) := io.in(i).bits.decode.ctrl.rfDest
-  io.wb.WriteData(i) := io.in(i).bits.commits(io.in(i).bits.decode.ctrl.fuType)
-  io.wb.ReadData1(i):=rf.read(io.wb.rfSrc1(i))
-  io.wb.ReadData2(i):=rf.read(io.wb.rfSrc2(i))
-  io.wb.valid(i) :=io.in(i).valid
-  io.wb.InstNo(i) := io.in(i).bits.decode.InstNo
+    io.wb.rfWen(i) := io.in(i).bits.decode.ctrl.rfWen && io.in(i).valid && !WAW(i)
+    io.wb.rfDest(i) := io.in(i).bits.decode.ctrl.rfDest
+    io.wb.WriteData(i) := io.in(i).bits.commits(io.in(i).bits.decode.ctrl.fuType)
+    io.wb.ReadData1(i):= Mux(src1FromFloatRegFile(i), floatRegFile.read(io.wb.rfSrc1(i)), rf.read(io.wb.rfSrc1(i)))
+    io.wb.ReadData2(i):= Mux(src2FromFloatRegFile(i), floatRegFile.read(io.wb.rfSrc2(i)), rf.read(io.wb.rfSrc2(i)))
+    io.wb.valid(i) :=io.in(i).valid
+    io.wb.InstNo(i) := io.in(i).bits.decode.InstNo
   }
   for(i<-0 to Issue_Num-1){
-  when (io.wb.rfWen(i)) { rf.write(io.wb.rfDest(i), io.wb.WriteData(i)) }
+    when (io.wb.rfWen(i)) {
+      when (io.wb.toFReg(i)){
+        floatRegFile.write(io.wb.rfDest(i), io.wb.WriteData(i))
+      }.otherwise{
+        rf.write(io.wb.rfDest(i), io.wb.WriteData(i))
+      }
+    }
   }
 
   for(i <- 0 to Issue_Num-1){
@@ -75,8 +84,8 @@ class SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with HasRegF
     difftest_commit.io.instr    := RegNext(io.in(i).bits.decode.cf.instr)
     difftest_commit.io.skip     := RegNext(io.in(i).bits.isMMIO)
     difftest_commit.io.isRVC    := RegNext(io.in(i).bits.decode.cf.instr(1,0)=/="b11".U)
-    difftest_commit.io.rfwen    := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
-    difftest_commit.io.fpwen    := false.B
+    //difftest_commit.io.rfwen    := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
+    //difftest_commit.io.fpwen    := false.B
     // difftest.io.wdata    := RegNext(io.wb.rfData)
     difftest_commit.io.wdest    := RegNext(io.wb.rfDest(i))
     difftest_commit.io.wpdest   := RegNext(io.wb.rfDest(i))
@@ -122,7 +131,8 @@ class new_SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     val redirect = new RedirectIO
   })
 
-  val rf = new RegFile
+  val intRf = new RegFile
+  val fpRf = new RegFile
 
   val redirct_index = PriorityMux(VecInit((0 to Commit_num-1).map(i => io.in(i).bits.decode.cf.redirect.valid && io.in(i).valid)).zipWithIndex.map{case(a,b)=>(a,b.U)})
   io.redirect := io.in(redirct_index).bits.decode.cf.redirect
@@ -131,23 +141,37 @@ class new_SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   val FronthasRedirect = VecInit((0 to Commit_num-1).map(i => i.U > redirct_index))
 
   for(i <- 0 to Commit_num-1){
-    io.wb.rfWen(i) := io.in(i).bits.decode.ctrl.rfWen && io.in(i).valid 
+    io.wb.rfWen(i) := io.in(i).bits.decode.ctrl.rfWen && io.in(i).valid
+    io.wb.toFReg(i) := io.in(i).bits.decode.ctrl.fReg.wen
     io.wb.rfDest(i) := io.in(i).bits.decode.ctrl.rfDest
     io.wb.WriteData(i) := io.in(i).bits.commits
     io.wb.valid(i) :=io.in(i).valid
     io.wb.InstNo(i) := io.in(i).bits.decode.InstNo
   }
   for(i<-0 to Commit_num-1){
-    when (io.wb.rfWen(i) && !FronthasRedirect(i)) { rf.write(io.wb.rfDest(i), io.wb.WriteData(i)) }
-    when(reset.asBool){rf.write(io.wb.rfDest(i), 0.U)}
+    when (io.wb.rfWen(i) && !FronthasRedirect(i)) {
+      when(io.wb.toFReg(i)) {
+        fpRf.write(io.wb.rfDest(i), io.wb.WriteData(i))
+        Debug("!!!WriteFloatReg!!! rfDest %x WriteData %x\n", io.wb.rfDest(i), io.wb.WriteData(i))
+      }.otherwise {
+        intRf.write(io.wb.rfDest(i), io.wb.WriteData(i))
+        Debug("!!!WriteIntReg!!! rfDest %x WriteData %x\n", io.wb.rfDest(i), io.wb.WriteData(i))
+      }
+    }
+    when(reset.asBool){
+      intRf.write(io.wb.rfDest(i), 0.U)
+      fpRf.write(io.wb.rfDest(i), 0.U)
+    }
   }
   for(i <- 0 to Issue_Num-1){
-    io.wb.ReadData1(i):=rf.read(io.wb.rfSrc1(i))
-    io.wb.ReadData2(i):=rf.read(io.wb.rfSrc2(i))
-    io.wb.ReadData3(i):=DontCare
-    if(Polaris_SIMDU_WAY_NUM!=0){
-      io.wb.ReadData3(i):=rf.read(io.wb.rfSrc3(i))
-    }
+    io.wb.ReadData1(i):= Mux(io.wb.src1fpRen(i), fpRf.read(io.wb.rfSrc1(i), fp = true), intRf.read(io.wb.rfSrc1(i)))
+    io.wb.ReadData2(i):= Mux(io.wb.src2fpRen(i), fpRf.read(io.wb.rfSrc2(i), fp = true), intRf.read(io.wb.rfSrc2(i)))
+    io.wb.ReadData3(i):= Mux(io.wb.src3fpRen(i), fpRf.read(io.wb.rfSrc3(i), fp = true), intRf.read(io.wb.rfSrc3(i)))
+//    if(Polaris_SIMDU_WAY_NUM!=0){
+//      io.wb.ReadData3(i):=rf.read(io.wb.rfSrc3(i))
+//    }else if(Src3FromFloatRegFile(i)){
+//      io.wb.ReadData3(i):=FloatRegFile.read(io.wb.rfSrc3(i))
+//    }
   }
   for(i <- 0 to Commit_num-1){
     io.in(i).ready := true.B
@@ -187,46 +211,64 @@ class new_SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   }
 
   for(i <- 0 to Commit_num-1){
-    Debug("[SIMD_WBU] issue %x valid %x pc %x wen %x wdata %x wdest %x futype %x instno %x isMMIO %x redirectvalid %x redirecttarget %x \n",i.U,io.in(i).valid,io.in(i).bits.decode.cf.pc,io.wb.rfWen(i),io.wb.WriteData(i),io.wb.rfDest(i),io.in(i).bits.decode.ctrl.fuType,io.in(i).bits.decode.InstNo,io.in(i).bits.isMMIO,io.in(i).bits.decode.cf.redirect.valid,io.in(i).bits.decode.cf.redirect.target)
+    Debug("[SIMD_WBU] issue %x valid %x pc %x wen %x fpWen %x wdata %x wdest %x futype %x instno %x isMMIO %x redirectvalid %x redirecttarget %x \n",i.U,io.in(i).valid,io.in(i).bits.decode.cf.pc,io.wb.rfWen(i), io.wb.toFReg(i),io.wb.WriteData(i),io.wb.rfDest(i),io.in(i).bits.decode.ctrl.fuType,io.in(i).bits.decode.InstNo,io.in(i).bits.isMMIO,io.in(i).bits.decode.cf.redirect.valid,io.in(i).bits.decode.cf.redirect.target)
   }
   Debug("[SIMD_WBU] redirctindex %x redirctvalid %x redircttarget %x \n",redirct_index,io.redirect.valid,io.redirect.target)
-  Debug("[SIMD_WBU] t0 %x \n",rf.read(5.U))
+  Debug("[SIMD_WBU] t0 %x \n",intRf.read(5.U))
+
   if (!p.FPGAPlatform) {
     for(i <- 0 to Commit_num-1){
-    val difftest_commit = Module(new DifftestInstrCommit)
-    difftest_commit.io.clock    := clock
-    difftest_commit.io.coreid   := 0.U
-    difftest_commit.io.index    := i.U
+      val difftest_commit = Module(new DifftestInstrCommit)
+      difftest_commit.io.clock    := clock
+      difftest_commit.io.coreid   := 0.U
+      difftest_commit.io.index    := i.U
 
-    difftest_commit.io.valid    := RegNext(io.in(i).valid && !FronthasRedirect(i))
-    difftest_commit.io.pc       := RegNext(SignExt(io.in(i).bits.decode.cf.pc, AddrBits))
-    difftest_commit.io.instr    := RegNext(io.in(i).bits.decode.cf.instr)
-    difftest_commit.io.skip     := RegNext(io.in(i).bits.isMMIO)
-    difftest_commit.io.isRVC    := RegNext(io.in(i).bits.decode.cf.instr(1,0)=/="b11".U)
-    difftest_commit.io.rfwen    := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
-    difftest_commit.io.fpwen    := false.B
-    //difftest_commit.io.wdata    := RegNext(io.wb.WriteData(i))
-    difftest_commit.io.wdest    := RegNext(io.wb.rfDest(i))
-    difftest_commit.io.wpdest   := RegNext(io.wb.rfDest(i))
+      difftest_commit.io.valid    := RegNext(io.in(i).valid && !FronthasRedirect(i))
+      difftest_commit.io.pc       := RegNext(SignExt(io.in(i).bits.decode.cf.pc, AddrBits))
+      difftest_commit.io.instr    := RegNext(io.in(i).bits.decode.cf.instr)
+      difftest_commit.io.skip     := RegNext(io.in(i).bits.isMMIO)
+      difftest_commit.io.isRVC    := RegNext(io.in(i).bits.decode.cf.instr(1,0)=/="b11".U)
+      difftest_commit.io.rfwen    := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U && !io.wb.toFReg(i)) // && valid(ringBufferTail)(i) && commited(ringBufferTail)(i)
+      difftest_commit.io.fpwen    := RegNext(io.wb.rfWen(i) && io.wb.toFReg(i))
+     // difftest_commit.io.wdata    := RegNext(io.wb.WriteData(i))
+      difftest_commit.io.wdest    := RegNext(io.wb.rfDest(i))
+      difftest_commit.io.wpdest   := RegNext(io.wb.rfDest(i))
 
+      val difftest_int_wb = Module(new DifftestIntWriteback)
+      difftest_int_wb.io.clock := clock
+      difftest_int_wb.io.coreid := 0.U
+      difftest_int_wb.io.valid := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U && !io.wb.toFReg(i))
+      difftest_int_wb.io.dest := RegNext(io.wb.rfDest(i))
+      difftest_int_wb.io.data := RegNext(io.wb.WriteData(i))
 
-    val difftest_wb = Module(new DifftestIntWriteback)
-    difftest_wb.io.clock := clock
-    difftest_wb.io.coreid := 0.U
-    difftest_wb.io.valid := RegNext(io.wb.rfWen(i) && io.wb.rfDest(i) =/= 0.U)
-    difftest_wb.io.dest := RegNext(io.wb.rfDest(i))
-    difftest_wb.io.data := RegNext(io.wb.WriteData(i))
+      val difftest_fp_wb = Module(new DifftestFpWriteback)
+      difftest_fp_wb.io.clock := clock
+      difftest_fp_wb.io.coreid := 0.U
+      difftest_fp_wb.io.valid := RegNext(io.wb.rfWen(i) && io.wb.toFReg(i))
+      difftest_fp_wb.io.dest := RegNext(io.wb.rfDest(i))
+      difftest_fp_wb.io.data := RegNext(io.wb.WriteData(i))
 
-    val runahead_commit = Module(new DifftestRunaheadCommitEvent)
-    runahead_commit.io.clock := clock
-    runahead_commit.io.coreid := 0.U
-    runahead_commit.io.index := i.U
-    runahead_commit.io.valid := RegNext(io.in(i).valid && io.in(i).bits.decode.cf.isBranch)
-    runahead_commit.io.pc    := RegNext(SignExt(io.in(i).bits.decode.cf.pc, AddrBits))
-    // when(runahead_commit.io.valid) {
-    //   printf("DUT commit branch %x\n", runahead_commit.io.pc)
-    // }
+      val runahead_commit = Module(new DifftestRunaheadCommitEvent)
+      runahead_commit.io.clock := clock
+      runahead_commit.io.coreid := 0.U
+      runahead_commit.io.index := i.U
+      runahead_commit.io.valid := RegNext(io.in(i).valid && io.in(i).bits.decode.cf.isBranch)
+      runahead_commit.io.pc    := RegNext(SignExt(io.in(i).bits.decode.cf.pc, AddrBits))
+      // when(runahead_commit.io.valid) {
+      //   printf("DUT commit branch %x\n", runahead_commit.io.pc)
+      // }
     }
+
+    val difftest_intReg = Module(new DifftestArchIntRegState)
+    difftest_intReg.io.clock  := clock
+    difftest_intReg.io.coreid := 0.U
+    difftest_intReg.io.gpr    := VecInit((0 to NRReg-1).map(i => intRf.read(i.U)))
+
+    val difftest_fpReg = Module(new DifftestArchFpRegState)
+    difftest_fpReg.io.clock  := clock
+    difftest_fpReg.io.coreid := 0.U
+    difftest_fpReg.io.fpr    := VecInit((0 to NRReg-1).map(i => fpRf.read(i.U, fp = true)))
+
   } else {
     for(i <- 0 to 0){
     BoringUtils.addSource(io.in(i).valid, "ilaWBUvalid")
@@ -235,11 +277,5 @@ class new_SIMD_WBU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     BoringUtils.addSource(io.wb.rfDest(i), "ilaWBUrfDest")
     BoringUtils.addSource(io.wb.WriteData(i), "ilaWBUrfData")
     }
-  }
-  if (!p.FPGAPlatform) {
-    val difftest = Module(new DifftestArchIntRegState)
-    difftest.io.clock  := clock
-    difftest.io.coreid := 0.U 
-    difftest.io.gpr    := VecInit((0 to NRReg-1).map(i => rf.read(i.U)))
   }
 }

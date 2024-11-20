@@ -16,7 +16,7 @@ class SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRegFil
         val flush = Input(Bool())
     })
     for(i<-0 to Issue_Num-1){
-        io.out(i):=DontCare
+        io.out(i) := DontCare
     }
     val sb = new ScoreBoard
     val InstBoard = Module(new InstBoard)
@@ -161,33 +161,41 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
         io.out(i):=DontCare
     }
     val InstBoard = Module(new InstBoard)
+    val FloatInstBoard = Module(new InstBoard)
     val q = Module(new InstQueue)
 
-    def isDepend(rfSrc: UInt, rfDest: UInt, wen: Bool): Bool = (rfSrc =/= 0.U) && (rfSrc === rfDest) && wen
+    def isDepend(rfSrc: UInt, rfDest: UInt, wen: Bool, srcIsFloat: Bool, wbIsFloat: Bool): Bool = ((rfSrc =/= 0.U) || srcIsFloat) && (rfSrc === rfDest) && wen && (srcIsFloat === wbIsFloat)
     def isCsrMouOp(i:Int):Bool = io.in(i).bits.ctrl.fuType === FuType.csr || io.in(i).bits.ctrl.fuType === FuType.mou
     def HasEnoughOperator(futype:UInt):Bool = futype === FuType.alu
-    def isLatestData(rfSrc: UInt,InstNo:UInt):Bool = InstBoard.io.RInstNo(rfSrc) === InstNo
+    def isLatestData(rfSrc: UInt, InstNo:UInt, IsFloat:Bool):Bool = Mux(IsFloat, FloatInstBoard.io.RInstNo(rfSrc), InstBoard.io.RInstNo(rfSrc)) === InstNo
     //def canforward(index:Int):Boolean = index == FuType.aluint || index == FuType.alu1int || index == FuType.lsuint || (if(Polaris_SIMDU_WAY_NUM != 0){index == FuType.simduint}else{false}) || (if(Polaris_SIMDU_WAY_NUM == 2){index == FuType.simdu1int}else{false})
 
     val rfSrc1 = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfSrc1))
     val rfSrc2 = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfSrc2))
-    val rfSrc3 = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfSrc2))
+    val rfSrc3 = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfSrc3))
     val rfDest = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfDest))
     val rfWen  = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.rfWen ))
+    val src1IsFloat = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fReg.src1Ren))
+    val src2IsFloat = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fReg.src2Ren))
+    val src3IsFloat = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fReg.src3Ren))
+    val toFReg = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fReg.wen))
+//    val srcIsFloat = VecInit((0 to Issue_Num-1).map(i => src1IsFloat(i) || src2IsFloat(i) || src3IsFloat(i) || toFReg(i)))
 
     val forwardRfWen = VecInit((0 to Forward_num-1).map(i => io.forward(i).wb.rfWen && io.forward(i).valid))
-    val src1DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc1(i),io.forward(j).InstNo) && isDepend(rfSrc1(i), io.forward(j).wb.rfDest, forwardRfWen(j))))))
-    val src2DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc2(i),io.forward(j).InstNo) && isDepend(rfSrc2(i), io.forward(j).wb.rfDest, forwardRfWen(j))))))
-    val src1DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc1(i),io.wb.InstNo(j)) && isDepend(rfSrc1(i), io.wb.rfDest(j), io.wb.rfWen(j))))))
-    val src2DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc2(i),io.wb.InstNo(j)) && isDepend(rfSrc2(i), io.wb.rfDest(j), io.wb.rfWen(j))))))
+    val src1DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc1(i),io.forward(j).InstNo, src1IsFloat(i)) && isDepend(rfSrc1(i), io.forward(j).wb.rfDest, forwardRfWen(j), src1IsFloat(i), io.forward(j).wb.toFReg)))))
+    val src2DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc2(i),io.forward(j).InstNo, src2IsFloat(i)) && isDepend(rfSrc2(i), io.forward(j).wb.rfDest, forwardRfWen(j), src2IsFloat(i), io.forward(j).wb.toFReg)))))
+    val src3DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc3(i),io.forward(j).InstNo, src3IsFloat(i)) && isDepend(rfSrc3(i), io.forward(j).wb.rfDest, forwardRfWen(j), src3IsFloat(i), io.forward(j).wb.toFReg)))))
+    val src1DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc1(i),io.wb.InstNo(j), src1IsFloat(i)) && isDepend(rfSrc1(i), io.wb.rfDest(j), io.wb.rfWen(j), src1IsFloat(i), io.wb.toFReg(j))))))
+    val src2DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc2(i),io.wb.InstNo(j), src2IsFloat(i)) && isDepend(rfSrc2(i), io.wb.rfDest(j), io.wb.rfWen(j), src2IsFloat(i), io.wb.toFReg(j))))))
+    val src3DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc3(i),io.wb.InstNo(j), src3IsFloat(i)) && isDepend(rfSrc3(i), io.wb.rfDest(j), io.wb.rfWen(j), src3IsFloat(i), io.wb.toFReg(j))))))
 
-    val src1Ready = VecInit((0 to Issue_Num-1).map(i => !InstBoard.io.valid(rfSrc1(i))||src1DependEX(i).reduce(_||_)||src1DependWB(i).reduce(_||_)))
-    val src2Ready = VecInit((0 to Issue_Num-1).map(i => !InstBoard.io.valid(rfSrc2(i))||src2DependEX(i).reduce(_||_)||src2DependWB(i).reduce(_||_)))
-    val src3Ready = VecInit((0 to Issue_Num-1).map(i => true.B))
+    val src1Ready = VecInit((0 to Issue_Num-1).map(i => Mux(src1IsFloat(i), !FloatInstBoard.io.valid(rfSrc1(i)), !InstBoard.io.valid(rfSrc1(i)))||src1DependEX(i).reduce(_||_)||src1DependWB(i).reduce(_||_)))
+    val src2Ready = VecInit((0 to Issue_Num-1).map(i => Mux(src2IsFloat(i), !FloatInstBoard.io.valid(rfSrc2(i)), !InstBoard.io.valid(rfSrc2(i)))||src2DependEX(i).reduce(_||_)||src2DependWB(i).reduce(_||_)))
+    val src3Ready = VecInit((0 to Issue_Num-1).map(i => Mux(src3IsFloat(i), !FloatInstBoard.io.valid(rfSrc3(i)), !InstBoard.io.valid(rfSrc3(i)))||src3DependEX(i).reduce(_||_)||src3DependWB(i).reduce(_||_)))
 
     val RAWinIssue = VecInit((0 to Issue_Num-1).map(i => {val raw = Wire(Vec(Issue_Num,Bool())) 
                                                         for(j <- 0 to i-1){
-                                                                raw(j) := io.in(j).valid && (isDepend(rfSrc1(i),rfDest(j),rfWen(j))||isDepend(rfSrc2(i),rfDest(j),rfWen(j))||(if(Polaris_SIMDU_WAY_NUM != 0){isDepend(rfSrc3(i),rfDest(j),rfWen(j))}else{false.B}))
+                                                                raw(j) := io.in(j).valid && (isDepend(rfSrc1(i), rfDest(j), rfWen(j), src1IsFloat(i), toFReg(j)) || isDepend(rfSrc2(i),rfDest(j),rfWen(j), src2IsFloat(i), toFReg(j)) || isDepend(rfSrc3(i),rfDest(j),rfWen(j), src3IsFloat(i), toFReg(j)))
                                                         }
                                                         for(j <- i to Issue_Num-1){
                                                                 raw(j) := false.B 
@@ -213,9 +221,9 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
 
     for(i <- 0 to Issue_Num-1){
         if(i == 0){
-            io.out(i).valid := io.in(i).valid && src1Ready(i) && src2Ready(i) && (if(Polaris_SIMDU_WAY_NUM != 0){src3Ready(i)}else{true.B}) && !(isCsrMouOp(i) && q.io.TailPtr =/= q.io.HeadPtr)
+            io.out(i).valid := io.in(i).valid && src1Ready(i) && src2Ready(i) && src3Ready(i) && !(isCsrMouOp(i) && q.io.TailPtr =/= q.io.HeadPtr)
         }else{
-            io.out(i).valid := io.in(i).valid && src1Ready(i) && src2Ready(i) && (if(Polaris_SIMDU_WAY_NUM != 0){src3Ready(i)}else{true.B}) && !RAWinIssue(i) && !FrontHasCsrMouOp(i) && !(isCsrMouOp(i) && !FrontisClear(i))
+            io.out(i).valid := io.in(i).valid && src1Ready(i) && src2Ready(i) && src3Ready(i) && !RAWinIssue(i) && !FrontHasCsrMouOp(i) && !(isCsrMouOp(i) && !FrontisClear(i))
             Debug("[SIMD_ISU] RAWinIssue %x FrontHasCsrMouOp %x isCsrMouOp %x FrontisClear %x \n",RAWinIssue(i),FrontHasCsrMouOp(i),isCsrMouOp(i),FrontisClear(i))
         }
     }
@@ -226,6 +234,8 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
     }else{
         io.in(1).ready := !io.in(1).valid||io.out(1).fire()
     }
+    Debug("!!!SIMD_ISU_ready0!!! inReady %x in_valid %x out_fire %x\n", io.in(0).ready, io.in(0).valid, io.out(0).fire())
+    Debug("!!!SIMD_ISU_ready1!!! inReady %x in_valid %x out_fire %x\n", io.in(1).ready, io.in(1).valid, io.out(1).fire())
 
     for(i <- 0 to Issue_Num-1){
         io.out(i).bits.data.src1 := PriorityMux(Seq(
@@ -243,6 +253,13 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
         (io.in(i).bits.ctrl.src2Type === SrcType.reg) -> io.wb.ReadData2(i)
         ))
     }
+    for (i <- 0 to Issue_Num - 1) {
+        io.out(i).bits.data.src3 := PriorityMux(Seq(
+            src3DependEX(i).reduce(_ || _) -> io.forward(PriorityMux(src3DependEX(i).zipWithIndex.map { case (a, b) => (a, b.U) })).wb.rfData, //io.forward.wb.rfData,
+            src3DependWB(i).reduce(_ || _) -> io.wb.WriteData(PriorityMux(src3DependWB(i).zipWithIndex.map { case (a, b) => (a, b.U) })), //io.wb.rfData,
+            true.B -> io.wb.ReadData3(i))
+        )
+    }
     for(i <- 0 to Issue_Num-1){
         io.out(i).bits.data.imm  := io.in(i).bits.data.imm
         io.out(i).bits.cf <> io.in(i).bits.cf
@@ -250,29 +267,26 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
         io.out(i).bits.ctrl.isBru := ALUOpType.isBru(io.in(i).bits.ctrl.fuOpType)
         io.out(i).bits.ctrl.isSrc1Forward := src1DependEX(i).reduce(_||_)
         io.out(i).bits.ctrl.isSrc2Forward := src2DependEX(i).reduce(_||_)
+        io.out(i).bits.ctrl.isSrc3Forward := src3DependEX(i).reduce(_||_)
     }
 
     io.wb.rfSrc1 := VecInit((0 to Issue_Num-1).map(i => rfSrc1(i)))
     io.wb.rfSrc2 := VecInit((0 to Issue_Num-1).map(i => rfSrc2(i)))
-    io.wb.rfSrc3 := DontCare
-    if(Polaris_SIMDU_WAY_NUM != 0){
-        (0 to Issue_Num-1).map(i => rfSrc3(i) := io.in(i).bits.ctrl.rfSrc3)
-        val src3DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc3(i),io.forward(j).InstNo) && isDepend(rfSrc3(i), io.forward(j).wb.rfDest, forwardRfWen(j))))))
-        val src3DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc3(i),io.wb.InstNo(j)) && isDepend(rfSrc3(i), io.wb.rfDest(j), io.wb.rfWen(j))))))
-        (0 to Issue_Num-1).map(i => src3Ready(i) := !InstBoard.io.valid(rfSrc3(i))||src3DependEX(i).reduce(_||_)||src3DependWB(i).reduce(_||_))
-        for(i <- 0 to Issue_Num-1){
-            io.out(i).bits.data.src3 := PriorityMux(Seq(
-            src3DependEX(i).reduce(_||_) -> io.forward(PriorityMux(src3DependEX(i).zipWithIndex.map{case(a,b)=>(a,b.U)})).wb.rfData, //io.forward.wb.rfData,
-            src3DependWB(i).reduce(_||_) -> io.wb.WriteData(PriorityMux(src3DependWB(i).zipWithIndex.map{case(a,b)=>(a,b.U)})), //io.wb.rfData,
-            true.B -> io.wb.ReadData3(i))
-            )
-        }
-        io.wb.rfSrc3 := VecInit((0 to Issue_Num-1).map(i => rfSrc3(i)))
-    }
+    io.wb.rfSrc3 := VecInit((0 to Issue_Num-1).map(i => rfSrc3(i)))
+    io.wb.src1fpRen := VecInit((0 to Issue_Num-1).map(i => src1IsFloat(i)))
+    io.wb.src2fpRen := VecInit((0 to Issue_Num-1).map(i => src2IsFloat(i)))
+    io.wb.src3fpRen := VecInit((0 to Issue_Num-1).map(i => src3IsFloat(i)))
+//    if(Polaris_SIMDU_WAY_NUM != 0){
+//        (0 to Issue_Num-1).map(i => rfSrc3(i) := io.in(i).bits.ctrl.rfSrc3)
+//        val src3DependEX = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Forward_num-1).map(j => isLatestData(rfSrc3(i),io.forward(j).InstNo) && isDepend(rfSrc3(i), io.forward(j).wb.rfDest, forwardRfWen(j))))))
+//        val src3DependWB = VecInit((0 to Issue_Num-1).map(i=>VecInit((0 to Commit_num-1).map(j => isLatestData(rfSrc3(i),io.wb.InstNo(j)) && isDepend(rfSrc3(i), io.wb.rfDest(j), io.wb.rfWen(j))))))
+//        (0 to Issue_Num-1).map(i => src3Ready(i) := !InstBoard.io.valid(rfSrc3(i))||src3DependEX(i).reduce(_||_)||src3DependWB(i).reduce(_||_))
+//        io.wb.rfSrc3 := VecInit((0 to Issue_Num-1).map(i => rfSrc3(i)))
+//    }
 
     q.io.setnum := io.out.map(i => i.fire().asUInt).reduce(_+&_)
     q.io.flush  := io.flush
-    q.io.clearnum:=io.num_enterwbu
+    q.io.clearnum := io.num_enterwbu
     for(i <- 0 to Issue_Num-1){
         val mightbeInstNo = q.io.HeadPtr +& i.U
         val startNewQueue = mightbeInstNo >= Queue_num.U
@@ -281,16 +295,28 @@ class new_SIMD_ISU(implicit val p:NutCoreConfig)extends NutCoreModule with HasRe
     }
     io.TailPtr := q.io.TailPtr
 
-    InstBoard.io.Wen     := VecInit((0 to NRReg-1).map(i => VecInit((0 to Issue_Num-1).map(j => i.U === rfDest(j)&&io.out(j).fire()&&rfWen(j))).reduce(_|_)))
+    InstBoard.io.Wen     := VecInit((0 to NRReg-1).map(i => VecInit((0 to Issue_Num-1).map(j => i.U === rfDest(j) && io.out(j).fire() && rfWen(j) && !toFReg(j))).reduce(_|_)))
     InstBoard.io.WInstNo := VecInit((0 to NRReg-1).map(i => {val raw = Wire(UInt(log2Up(Queue_num).W))
                                                                  raw:= 0.U
                                                             for(j <- 0 to Issue_Num-1){
-                                                                when(i.U === rfDest(j)&&io.out(j).fire()&&rfWen(j)){
+                                                                when(i.U === rfDest(j)&&io.out(j).fire()&&rfWen(j) && !toFReg(j)){
                                                                     raw := io.out(j).bits.InstNo
                                                                 }}
                                                             raw}))
-    InstBoard.io.clear   := VecInit((0 to NRReg-1).map(i => VecInit((0 to Commit_num-1).map(j => io.wb.rfWen(j) && i.U === io.wb.rfDest(j) && io.wb.InstNo(j) === InstBoard.io.RInstNo(i))).reduce(_|_)))
+    InstBoard.io.clear   := VecInit((0 to NRReg-1).map(i => VecInit((0 to Commit_num-1).map(j => io.wb.rfWen(j) && i.U === io.wb.rfDest(j) && io.wb.InstNo(j) === InstBoard.io.RInstNo(i) && !io.wb.toFReg(j))).reduce(_|_)))
     InstBoard.io.flush   := io.flush
+
+    FloatInstBoard.io.Wen := VecInit((0 to NRReg - 1).map(i => VecInit((0 to Issue_Num - 1).map(j => i.U === rfDest(j) && io.out(j).fire() && rfWen(j) && toFReg(j))).reduce(_ | _)))
+    FloatInstBoard.io.WInstNo := VecInit((0 to NRReg - 1).map(i => {val raw = Wire(UInt(log2Up(Queue_num).W))
+                                                                        raw := 0.U
+                                                                    for (j <- 0 to Issue_Num - 1) {
+                                                                        when(i.U === rfDest(j) && io.out(j).fire() && rfWen(j) && toFReg(j)) {
+                                                                            raw := io.out(j).bits.InstNo
+                                                                        }
+                                                                    }
+                                                                    raw}))
+    FloatInstBoard.io.clear := VecInit((0 to NRReg - 1).map(i => VecInit((0 to Commit_num - 1).map(j => io.wb.rfWen(j) && i.U === io.wb.rfDest(j) && io.wb.InstNo(j) === FloatInstBoard.io.RInstNo(i) && io.wb.toFReg(j))).reduce(_ | _)))
+    FloatInstBoard.io.flush := io.flush
 
     for(i <- 0 to Issue_Num-1){
     Debug("[SIMD_ISU] issue %x valid %x rfSrc1 %x rfSrc2 %x rfdata1 %x rfdata2 %x rfsrc1ready %x rfsrc2ready %x\n", i.U,io.in(i).valid,rfSrc1(i),rfSrc2(i), io.out(i).bits.data.src1,io.out(i).bits.data.src2,src1Ready(i),src2Ready(i))
