@@ -149,3 +149,4 @@ class FMA extends Module with FMAOpType {
   io.out.bits.result := Mux(isSingle(func), box(sfma.io.out.bits.result, D), dfma.io.out.bits.result)
   io.out.bits.fflags := Mux(isSingle(func), sfma.io.out.bits.fflags, dfma.io.out.bits.fflags)
 }
+

@@ -174,7 +174,7 @@ object RVFInstr extends HasInstrType {
     FCVT_S_L  -> List(N, N, N, Y),       //i->f
     FCVT_S_LU -> List(N, N, N, Y),       //i->f
 
-    FLD       -> List(N, N, N, Y),       //i->f
+    FLD       -> List(N, N, N, Y),          //i->f
     FSD       -> List(N, Y, N, N),                      //i,f->M
     FMADD_D   -> List(Y, Y, Y, Y),//f->f
     FMSUB_D   -> List(Y, Y, Y, Y),//f->f

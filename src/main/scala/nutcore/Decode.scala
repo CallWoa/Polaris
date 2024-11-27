@@ -119,9 +119,11 @@ object Instructions extends HasInstrType with HasNutCoreParameter {
 
 object CInstructions extends HasInstrType with HasNutCoreParameter{
   def NOP = 0x00000013.U
-  val DecodeDefault = List(RVCInstr.ImmNone, RVCInstr.DtCare, RVCInstr.DtCare, RVCInstr.DtCare)
+  val CExtraDecodeDefault = List(RVCInstr.ImmNone, RVCInstr.DtCare, RVCInstr.DtCare, RVCInstr.DtCare)
   // val DecodeDefault = List(InstrN, FuType.csr, CSROpType.jmp)
   def CExtraDecodeTable = RVCInstr.cExtraTable
+  val CFpCtrlDefault = List(N, N)
+  def CFpCtrlTable = RVCInstr.cFpCtrlTable
 }
 
 object FInstructions extends HasInstrType{

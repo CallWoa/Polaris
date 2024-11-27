@@ -92,3 +92,4 @@ class IntToFP(val expWidth: Int, val sigWidth: Int) extends Module {
   io.out.result := post_norm.io.result
   io.out.fflags := post_norm.io.fflags
 }
+

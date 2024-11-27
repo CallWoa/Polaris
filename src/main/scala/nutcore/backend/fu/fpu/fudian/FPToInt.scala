@@ -109,3 +109,4 @@ class FPToInt(val expWidth: Int, val sigWidth: Int) extends Module {
   io.out.fflags := Cat(iv, false.B, false.B, false.B, ix)
 
 }
+

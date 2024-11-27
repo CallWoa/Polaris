@@ -339,16 +339,16 @@ class FDIV(val expWidth: Int, val sigWidth: Int) extends Module {
   val combinedSig = Mux(noInf || noZero, specialRmSig,
     Mux(skipIterReg, special_sig,
       Mux(rounder.io.cout && (resExp === FloatPoint.maxNormExp(expWidth).U), rounder.io.in(sigWidth - 2, 0) ,rounder.io.out(sigWidth - 2, 0))))
-  val combinedExpReg = RegEnable(combinedExp, state(s_post_0))
-  val combinedSigReg = RegEnable(combinedSig, state(s_post_0))
-  val combinedFFlagsReg = RegEnable(combinedFFlags, state(s_post_0))
-  val combinedSignReg = RegEnable(Mux(inv, false.B, resSignReg), state(s_post_0))
+//  val combinedExpReg = RegEnable(combinedExp, state(s_post_0))
+//  val combinedSigReg = RegEnable(combinedSig, state(s_post_0))
+//  val combinedFFlagsReg = RegEnable(combinedFFlags, state(s_post_0))
+//  val combinedSignReg = RegEnable(Mux(inv, false.B, resSignReg), state(s_post_0))
 
 //  val specialInf = noInf || noZero
 //  val specialInfResult = Mux(noInf, Cat(resSignReg, FloatPoint.maxNormExp(expWidth).U, Fill(precision-1, true.B)), Cat(resSignReg, 0.U(expWidth.W), 1.U((precision - 1).W)))
 
-  io.out.bits.result := Cat(combinedSignReg, combinedExpReg, combinedSigReg)
-  io.out.bits.fflags := combinedFFlagsReg
+  io.out.bits.result := Cat(Mux(inv, false.B, resSignReg), combinedExp, combinedSig)
+  io.out.bits.fflags := combinedFFlags
 }
 
 class DivIterModule(len: Int, itn_len: Int) extends Module {
