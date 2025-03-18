@@ -154,6 +154,9 @@ class Divider(len: Int = 64) extends NutCoreModule {
 
   io.out.valid := (if (HasDiv) (state === s_finish) else io.in.valid) // FIXME: should deal with ready = 0
   io.in.ready := (state === s_idle)
+
+  val divtime = io.in.valid
+  BoringUtils.addSource(divtime, "divtime")
 }
 
 class MDUIO extends FunctionUnitIO {
@@ -163,7 +166,7 @@ class MDUIO extends FunctionUnitIO {
 class MDU extends NutCoreModule {
   val io = IO(new MDUIO)
 
-  val (valid, src1, src2, src3, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.src3, io.in.bits.func)
+   val (valid, src1, src2, src3, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.src3, io.in.bits.func)
   def access(valid: Bool, src1: UInt, src2: UInt, func: UInt): UInt = {
     this.valid := valid
     this.src1 := src1

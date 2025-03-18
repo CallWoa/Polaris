@@ -25,6 +25,7 @@ class floatRegCtrl extends Bundle {
   val src2Ren = Output(Bool())
   val src3Ren = Output(Bool())
 }
+
 class CtrlSignalIO extends NutCoreBundle {
   val src1Type = Output(SrcType())
   val src2Type = Output(SrcType())
@@ -38,6 +39,7 @@ class CtrlSignalIO extends NutCoreBundle {
   val rfSrc2 = Output(UInt(5.W))
   val rfSrc3 = Output(UInt(5.W))
   val rfWen = Output(Bool())
+  val rfVector = Output(Bool())
   val rfDest = Output(UInt(5.W))
   val isNutCoreTrap = Output(Bool())
   val isSrc1Forward = Output(Bool())
@@ -50,11 +52,12 @@ class CtrlSignalIO extends NutCoreBundle {
   val fReg = new floatRegCtrl
 }
 
-class DataSrcIO extends NutCoreBundle {
+class DataSrcIO extends NutCoreBundle with HasLSUConst{
   val src1 = Output(UInt(XLEN.W))
   val src2 = Output(UInt(XLEN.W))
   val src3 = Output(UInt(XLEN.W))
   val imm  = Output(UInt(XLEN.W))
+  val src_vector = Output(UInt(vector_wdata_width.W))
 }
 
 class RedirectIO extends NutCoreBundle {
@@ -98,7 +101,7 @@ class DecodeIO extends NutCoreBundle with HasNutCoreParameter{
 
 class WriteBackIO extends NutCoreBundle {
   val rfWen = Output(Bool())
-  val toFReg = Output(Bool())
+   val toFReg = Output(Bool())
   val rfDest = Output(UInt(5.W))
   val rfData = Output(UInt(XLEN.W))
 }
@@ -115,22 +118,28 @@ class SIMD_WriteBackIO() extends NutCoreBundle with HasNutCoreParameter{
   val valid = Vec(Issue_Num,Output(Bool()))
   val InstNo = Vec(Issue_Num,Output(UInt(log2Up(Queue_num).W)))
 }
-class new_SIMD_WriteBackIO() extends NutCoreBundle with HasNutCoreParameter{
+class new_SIMD_WriteBackIO() extends NutCoreBundle with HasNutCoreParameter with HasLSUConst with HasRegFileParameter{
   val rfWen = Vec(Commit_num,Output(Bool()))
   val toFReg = Vec(Commit_num, Output(Bool()))
   val rfDest = Vec(Commit_num,Output(UInt(5.W)))
+  val rfVector = Vec(Commit_num,Output(Bool()))
   val WriteData = Vec(Commit_num,Output(UInt(XLEN.W)))
+  val WriteDataVec= Vec(vector_rdata_width/XLEN,Output(UInt(XLEN.W)))
+  val WriteDestVec = Vec(vector_rdata_width/XLEN,Output(UInt(log2Up(NRReg).W)))
   val rfSrc1 = Vec(Issue_Num,Input(UInt(5.W)))
   val rfSrc2 = Vec(Issue_Num,Input(UInt(5.W)))
   val rfSrc3 = Vec(Issue_Num,Input(UInt(5.W)))
   val src1fpRen = Vec(Issue_Num,Input(Bool()))
   val src2fpRen = Vec(Issue_Num,Input(Bool()))
   val src3fpRen = Vec(Issue_Num,Input(Bool()))
+  val rfSrcVec  = Vec(vector_wdata_width/XLEN,Input(UInt(5.W)))
   val ReadData1 = Vec(Issue_Num,Output(UInt(XLEN.W)))
   val ReadData2 = Vec(Issue_Num,Output(UInt(XLEN.W)))
   val ReadData3 = Vec(Issue_Num,Output(UInt(XLEN.W)))
+  val ReadDataVec = Vec(vector_wdata_width/XLEN,Output(UInt(XLEN.W)))
   val valid = Vec(Commit_num,Output(Bool()))
   val InstNo = Vec(Commit_num,Output(UInt(log2Up(Queue_num).W)))
+  val VecInstNo = Output(UInt(log2Up(Queue_num).W))
 }
 
 class CommitIO extends NutCoreBundle {
@@ -139,11 +148,12 @@ class CommitIO extends NutCoreBundle {
   val intrNO = Output(UInt(XLEN.W))
   val commits = Output(Vec(FuType.num, UInt(XLEN.W)))
 }
-class SIMD_CommitIO extends NutCoreBundle {
+class SIMD_CommitIO extends NutCoreBundle with HasLSUConst{
   val decode = new DecodeIO
   val isMMIO = Output(Bool())
   val intrNO = Output(UInt(XLEN.W))
   val commits = Output(UInt(XLEN.W))
+  val vector_commits = Output(UInt(vector_rdata_width.W))
 }
 
 class OOCommitIO extends NutCoreBundle with HasBackendConst{
@@ -172,7 +182,6 @@ class ForwardIO extends NutCoreBundle {
   val wb = new WriteBackIO
   val fuType = Output(FuType())
   val InstNo = Output(UInt(log2Up(Queue_num).W))
-//  val IsFloat = Output(UInt(log2Up(Queue_num).W))
 }
 
 class MMUIO extends NutCoreBundle {

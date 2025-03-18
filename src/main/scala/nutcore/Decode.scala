@@ -22,23 +22,29 @@ import chisel3.util._
 trait HasInstrType {
   def N = false.B
   def Y = true.B
-  def InstrN  = "b0000".U
-  def InstrI  = "b0100".U
-  def InstrIZ = "b1100".U
-  def InstrR  = "b0101".U
-  def InstrS  = "b0010".U
-  def InstrB  = "b0001".U
-  def InstrU  = "b0110".U
-  def InstrJ  = "b0111".U
-  def InstrA  = "b1110".U
-  def InstrSA = "b1111".U // Atom Inst: SC
-  def InstrP  = "b10100".U
-  def InstrPI = "b10101".U
-  def InstrPM = "b10110".U
-  def InstrPB = "b10111".U
-  def InstrPRD= "b11100".U
-  def InstrR4 = "b11110".U
+  def InstrN  = "b00000".U
+  def InstrI  = "b00100".U
+  def InstrIZ = "b01100".U
+  def InstrR  = "b00101".U
+  def InstrS  = "b00010".U
+  def InstrB  = "b00001".U
+  def InstrU  = "b00110".U
+  def InstrJ  = "b00111".U
+  def InstrA  = "b01110".U
+  def InstrSA = "b01111".U // Atom Inst: SC
+  def InstrP  = "b010100".U
+  def InstrPI = "b010101".U
+  def InstrPM = "b010110".U
+  def InstrPB = "b010111".U
+  def InstrPRD= "b011100".U
+  def InstrR4 = "b01101".U
+  def InstrPLDR= "b11101".U
+  def InstrPSTR= "b11001".U
+  def InstrPLDI= "b11111".U
+  def InstrPSTI= "b11011".U
+  def InstrSNN= "b11110".U
   def isrfWen(instrType : UInt): Bool = instrType(2)
+  def isInstrPLS(instrType : UInt): Bool = instrType(4) & instrType(3) & instrType(0)
 }
 
 // trait CompInstConst {
@@ -62,7 +68,7 @@ object SrcType {
 }
 
 object FuType extends HasNutCoreConst {
-  def num = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + 4
+  def num = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM + 1
   def width = 4
   def aluint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM}else{0}
   def alu = aluint.U(width.W)
@@ -74,7 +80,7 @@ object FuType extends HasNutCoreConst {
   def mdu = mduint.U(width.W)
   def csrint = 1
   def csr = csrint.U(width.W)
-  def mou = "b1100".U
+  def mou = "b1111".U
   def bruint = if(Polaris_Independent_Bru == 1){0}else{alu1int}
   def bru = bruint.U(width.W)
   def simdu = simduint.U(width.W)
@@ -83,13 +89,18 @@ object FuType extends HasNutCoreConst {
   def simdu1int = if(Polaris_SIMDU_WAY_NUM != 0){if(Polaris_Independent_Bru == 1){3}else{4}}else{0}
   //fpu
   def fma = fmaint.U(width.W)
-  def fmaint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 2}else{5+Polaris_SIMDU_WAY_NUM}
+  def fmaint = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM
   def fdivsqrt = fdivsqrtint.U(width.W)
-  def fdivsqrtint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 3}else{6+Polaris_SIMDU_WAY_NUM}
+  def fdivsqrtint = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM + 1
   def fconv = fconvint.U(width.W)
-  def fconvint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 4}else{7+Polaris_SIMDU_WAY_NUM}
+  def fconvint = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM + 2
   def fcomp = fcompint.U(width.W)
-  def fcompint = if(Polaris_Independent_Bru == 1){Polaris_Independent_Bru + 3 + Polaris_SIMDU_WAY_NUM + 5}else{8+Polaris_SIMDU_WAY_NUM}
+  def fcompint = 5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM + 3
+  //snn
+  def snnuint = if(Polaris_SNN_WAY_NUM != 0){5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM}else{0}
+  def snnu = snnuint.U(width.W)
+  def snnu1int = if(Polaris_SNN_WAY_NUM != 0){if(Polaris_SNN_WAY_NUM == 2){5 + Polaris_Independent_Bru + Polaris_SIMDU_WAY_NUM + 1}else{0}}else{0}
+  def snnu1 = snnu1int.U(width.W)
   def apply() = UInt(width.W)
 }
 
@@ -112,18 +123,26 @@ object Instructions extends HasInstrType with HasNutCoreParameter {
     RVPIInstr.table ++
     RVPMInstr.table ++
     RVPBInstr.table ++
-    RVPRDInstr.table ++
+    RVPRDInstr.table 
+    }else Nil) ++
+    (if(Polaris_Vector_LDST){
+    RVPLSInstr.table
+    }else Nil) ++
+    (if(Polaris_SNN_WAY_NUM != 0){
+    RVSNNInstr.table 
+    }else Nil) ++
     RVFInstr.table
-    }else Nil)
 }
 
 object CInstructions extends HasInstrType with HasNutCoreParameter{
   def NOP = 0x00000013.U
   val CExtraDecodeDefault = List(RVCInstr.ImmNone, RVCInstr.DtCare, RVCInstr.DtCare, RVCInstr.DtCare)
+  val DecodeDefault = List(RVCInstr.ImmNone, RVCInstr.DtCare, RVCInstr.DtCare, RVCInstr.DtCare)
   // val DecodeDefault = List(InstrN, FuType.csr, CSROpType.jmp)
   def CExtraDecodeTable = RVCInstr.cExtraTable
   val CFpCtrlDefault = List(N, N)
   def CFpCtrlTable = RVCInstr.cFpCtrlTable
+  
 }
 
 object FInstructions extends HasInstrType{

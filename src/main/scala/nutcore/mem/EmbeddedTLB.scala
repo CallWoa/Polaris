@@ -489,7 +489,8 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
   //}
   val tlbexec_inbundle = Wire(Decoupled(new SIMD_TLBEXEC_INBUNDLE))
   tlbexec_inbundle.bits := 0.U.asTypeOf(new SIMD_TLBEXEC_INBUNDLE)
-  PipelineConnectTLB(tlbexec_inbundle, tlbExec.io.in, mdUpdate, tlbExec.io.isFinish, io.flush, vmEnable)
+  val req_cancel = WireInit(false.B)
+  PipelineConnectTLB(tlbexec_inbundle, tlbExec.io.in, mdUpdate, tlbExec.io.isFinish, io.flush || req_cancel, vmEnable)
 
   val out_req = Wire(Decoupled(new SimpleBusReqBundle(userBits = userBits, addrBits = VAddrBits)))
   out_req.bits := tlbExec.io.out.bits
@@ -517,6 +518,7 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
     io.out.req.bits.wmask := io.in.req.bits.wmask
     io.out.req.bits.wdata := io.in.req.bits.wdata
     io.out.req.bits.user.map(_ := io.in.req.bits.user.getOrElse(0.U))
+    io.out.req.bits.vector := io.in.req.bits.vector
     when(io.flush){state := s_idle}
     out_req.valid := false.B
     out_req.ready := false.B
@@ -555,9 +557,10 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
 
     // hit permission check
     val hitCheck = hit /*&& hitFlag.v */&& !(io.csrMMU.priviledgeMode === ModeU && !hitFlag.u) && !(io.csrMMU.priviledgeMode === ModeS && hitFlag.u && (!io.csrMMU.status_sum || ifecth))
-    val hitExec = hitCheck && hitFlag.x
-    val hitLoad = hitCheck && (hitFlag.r || io.csrMMU.status_mxr && hitFlag.x)
-    val hitStore = hitCheck && hitFlag.w
+    val hitADCheck = if (Settings.get("FPGAPlatform")) false.B else !hitFlag.a || !hitFlag.d && req.isWrite()
+    val hitExec = hitCheck && hitFlag.x && !hitADCheck
+    val hitLoad = hitCheck && (hitFlag.r || io.csrMMU.status_mxr && hitFlag.x) && !hitADCheck
+    val hitStore = hitCheck && hitFlag.w && !hitADCheck
 
     val isAMO = WireInit(false.B)
     if (tlbname == "dtlb") {
@@ -597,6 +600,7 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
         when(!io.in.req.valid){
           state := s_idle
           tlbExec.io.flush := true.B
+          req_cancel := true.B
         }
       }
     }
@@ -618,6 +622,7 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
     ismmio := out_req.fire() && AddressSpace.isMMIO(out_req.bits.addr)
   }
   io.in.resp <> io.out.resp
+  //io.in.resp.bits.vector := 0.U.asTypeOf(io.in.resp.bits.vector)
   //Debug("state:%x \n",state)
 
   // lsu need dtlb signals
@@ -649,17 +654,9 @@ class SIMD_TLB(implicit val tlbConfig: TLBConfig) extends TlbModule with HasTLBI
       io.ipf := tlbExec.io.ipf
     }
   }
-  val a = RegInit(0.U(64.W))
-  when(io.out.req.fire() && io.out.req.bits.addr === "h808005d0".U && io.out.isWrite()){a := io.out.req.bits.wdata}
 
-  val c1 = RegInit(false.B)
-  when((io.out.req.bits.addr) === "h81801000".U && io.out.req.fire() && io.out.isWrite()){c1 := true.B}
-  val c = RegInit(0.U(128.W))
-  when(c1){c := c + 1.U}
-  when((io.out.req.bits.addr) === "h81801000".U && io.out.req.fire() && io.out.isWrite()){c := 0.U}
-  Debug("c %x \n",c)
-
-  Debug("InReq(%d, %d) InResp(%d, %d) OutReq(%d, %d) OutResp(%d, %d) vmEnable:%d mode:%d a %x \n", io.in.req.valid, io.in.req.ready, io.in.resp.valid, io.in.resp.ready, io.out.req.valid, io.out.req.ready, io.out.resp.valid, io.out.resp.ready, vmEnable, io.csrMMU.priviledgeMode,a)
+  Debug("InReq(%d, %d) InResp(%d, %d) OutReq(%d, %d) OutResp(%d, %d) vmEnable:%d mode:%d \n", io.in.req.valid, io.in.req.ready, io.in.resp.valid, io.in.resp.ready, io.out.req.valid, io.out.req.ready, io.out.resp.valid, io.out.resp.ready, vmEnable, io.csrMMU.priviledgeMode)
+  Debug("OutReq-vector:vstep %x vwdata %x velen %x vxlen %x vecEnable %x\n",io.out.req.bits.vector.vstep,io.out.req.bits.vector.vwdata,io.out.req.bits.vector.velen,io.out.req.bits.vector.vxlen,io.out.req.bits.vector.vecEnable)
   Debug("InReq: addr:%x cmd:%d wdata:%x OutReq: addr:%x cmd:%x wdata:%x\n", io.in.req.bits.addr, io.in.req.bits.cmd, io.in.req.bits.wdata, io.out.req.bits.addr, io.out.req.bits.cmd, io.out.req.bits.wdata)
   Debug("OutResp: rdata:%x cmd:%x Inresp: rdata:%x cmd:%x\n", io.out.resp.bits.rdata, io.out.resp.bits.cmd, io.in.resp.bits.rdata, io.in.resp.bits.cmd)
   Debug("satp:%x flush:%d cacheEmpty:%d instrPF:%d loadPF:%d storePF:%d \n", satp, io.flush, io.cacheEmpty, io.ipf, io.csrMMU.loadPF, io.csrMMU.storePF)
@@ -802,30 +799,31 @@ class SIMD_TLBEXEC(implicit val tlbConfig: TLBConfig) extends TlbModule{
           }
         }.elsewhen (level =/= 0.U) { //TODO: fix needFlush
           val permCheck = missflag.v && !(pf.priviledgeMode === ModeU && !missflag.u) && !(pf.priviledgeMode === ModeS && missflag.u && (!pf.status_sum || ifecth))
-          val permExec = permCheck && missflag.x
-          val permLoad = permCheck && (missflag.r || pf.status_mxr && missflag.x)
-          val permStore = permCheck && missflag.w
-          val updateAD = !missflag.a || (!missflag.d && req.isWrite())
+          val permAD = if (Settings.get("FPGAPlatform")) false.B else !missflag.a || (!missflag.d && req.isWrite())
+          val permExec = permCheck && missflag.x && !permAD 
+          val permLoad = permCheck && (missflag.r || pf.status_mxr && missflag.x) && !permAD
+          val permStore = permCheck && missflag.w && !permAD
+          val updateAD = if (Settings.get("FPGAPlatform")) !missflag.a || (!missflag.d && req.isWrite()) else false.B
           val updateData = Cat( 0.U(56.W), req.isWrite(), 1.U(1.W), 0.U(6.W) )
           missRefillFlag := Cat(req.isWrite(), 1.U(1.W), 0.U(6.W)) | missflag.asUInt
           memRespStore := io.mem.resp.bits.rdata | updateData 
           if(tlbname == "itlb") {
-            when (!permExec || updateAD) { 
+            when (!permExec) { 
               missIPF := true.B ; state := s_wait_resp
             }.otherwise { 
-              state := s_wait_resp
+              state := Mux(updateAD, s_write_pte, s_wait_resp)
               missMetaRefill := true.B
             }
           }
           if(tlbname == "dtlb") {
-            when((!permLoad && req.isRead()) || (!permStore && req.isWrite()) || updateAD) { 
+            when((!permLoad && req.isRead()) || (!permStore && req.isWrite())) { 
               state := s_miss_slpf
               loadPF := req.isRead() && !isAMO
               missLPF := loadPF
               storePF := req.isWrite() || isAMO
               missSPF := storePF
             }.otherwise {
-              state := s_wait_resp
+              state := Mux(updateAD, s_write_pte, s_wait_resp)
               missMetaRefill := true.B
             }
           }
@@ -882,6 +880,7 @@ class SIMD_TLBEXEC(implicit val tlbConfig: TLBConfig) extends TlbModule{
   // mem
   val cmd = Mux(state === s_write_pte, SimpleBusCmd.write, SimpleBusCmd.read)
   io.mem.req.bits.apply(addr = Mux(hitWB, hitData.pteaddr, raddr), cmd = cmd, size = (if (XLEN == 64) "b11".U else "b10".U), wdata =  Mux( hitWB, hitWBStore, memRespStore), wmask = 0xff.U)
+  io.mem.req.bits.vector := DontCare
   io.mem.req.valid := ((state === s_memReadReq || state === s_write_pte) && !ioFlush)
   io.mem.resp.ready := true.B
 
@@ -897,7 +896,7 @@ class SIMD_TLBEXEC(implicit val tlbConfig: TLBConfig) extends TlbModule{
   io.out.bits.addr := Mux(hit, maskPaddr(hitData.ppn, req.addr(PAddrBits-1, 0), hitMask), maskPaddr(memRespStore.asTypeOf(pteBundle).ppn, req.addr(PAddrBits-1, 0), missMaskStore))
   io.out.valid := !ioFlush && io.in.valid && Mux(false.B, !(io.pf.isPF() || loadPF || storePF || missLPF || missSPF), state === s_wait_resp && !(io.pf.isPF() || loadPF || storePF || missLPF || missSPF || io.ipf))// && !alreadyOutFire
   
-  io.in.ready := !io.in.valid || io.out.fire() && io.mdReady
+  io.in.ready := (!io.in.valid && (state === s_idle) || io.out.fire()) && io.mdReady
 
   io.ipf := Mux(hit, hitinstrPF, missIPF)
   io.isFinish := io.out.fire() //|| io.pf.isPF()

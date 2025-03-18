@@ -9,172 +9,6 @@ import bus.simplebus._
 import top.Settings
 import difftest._
 
-class SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule {
-  val io = IO(new Bundle {
-    val in = Vec(Issue_Num,Flipped(Decoupled(new DecodeIO)))
-    val out = Vec(Issue_Num,Decoupled(new CommitIO))
-    val flush = Input(Bool())
-    val dmem = new SimpleBusUC(addrBits = VAddrBits)
-    val forward = Vec(Issue_Num,new ForwardIO)
-    val memMMU = Flipped(new MemMMUIO)
-  })
-
-  def WhoTakeThisOperator(futype:UInt):UInt = PriorityMux(VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fuType === futype && io.in(i).valid)).zipWithIndex.map{case(a,b) => (a,b.U)})
-
-  val src1     = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.data.src1))
-  val src2     = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.data.src2))
-  val fuType   = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fuType))
-  val fuOpType = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.fuOpType))
-
-  val fuValids = VecInit((0 to FuType.num).map(i => {val raw = Wire(Vec(Issue_Num,Bool()))
-                                                  for(j <- 0 to Issue_Num-1){
-                                                      raw(j) := fuType(j) === i.U && io.in(j).valid && !io.flush
-                                                  }
-                                                  raw.reduce(_||_)
-                                                 }))
-  //ALU
-  val alu = Module(new ALU(hasBru = true,NO1 = true))
-  val WhoTakeAlu = WhoTakeThisOperator(FuType.alu)
-  val aluOut = alu.access(valid = fuValids(FuType.alu), src1 = src1(WhoTakeAlu), src2 = src2(WhoTakeAlu), func = fuOpType(WhoTakeAlu))
-  alu.io.cfIn := io.in(WhoTakeAlu).bits.cf
-  alu.io.offset := io.in(WhoTakeAlu).bits.data.imm
-  alu.io.out.ready := true.B
-
-  //ALU1
-  val alu1 = Module(new ALU(hasBru = false,NO1 = false))
-  val WhoTakeAlu1 = WhoTakeThisOperator(FuType.alu1)
-  val alu1Out = alu1.access(valid = fuValids(FuType.alu1), src1 = src1(WhoTakeAlu1), src2 = src2(WhoTakeAlu1), func = fuOpType(WhoTakeAlu1))
-  alu1.io.cfIn := io.in(WhoTakeAlu1).bits.cf
-  alu1.io.offset := io.in(WhoTakeAlu1).bits.data.imm
-  alu1.io.out.ready := true.B
-
-  //LSU
-  val lsu = Module(new pipeline_lsu)
-  val WhoTakeLsu = WhoTakeThisOperator(FuType.csr)
-  val lsuOut = lsu.access(valid = fuValids(FuType.lsu), src1 = src1(WhoTakeLsu), src2 = io.in(WhoTakeLsu).bits.data.imm, func = fuOpType(WhoTakeLsu))
-  lsu.io.wdata := src2(WhoTakeLsu)
-  lsu.io.DecodeIn := io.in(WhoTakeLsu).bits
-  for(i <- 0 to Issue_Num-1){
-    io.out(i).bits.isMMIO := i.U === WhoTakeLsu && (lsu.io.isMMIO || (AddressSpace.isMMIO(io.in(WhoTakeLsu).bits.cf.pc) && io.out(i).valid))
-  }
-  io.dmem <> lsu.io.dmem
-  lsu.io.out.ready := true.B
-  lsu.io.flush := io.flush
-
-  //MDU
-  val mdu = Module(new MDU)
-  val WhoTakeMdu = WhoTakeThisOperator(FuType.mdu)
-  val mduOut = mdu.access(valid = fuValids(FuType.mdu), src1 = src1(WhoTakeMdu), src2 = src2(WhoTakeMdu), func = fuOpType(WhoTakeMdu))
-  mdu.io.out.ready := true.B
-  mdu.io.flush := io.flush
-
-  //CSRU
-  val csr = Module(new CSR)
-  val WhoTakeCsr = WhoTakeThisOperator(FuType.csr)
-  val csrOut = csr.access(valid = fuValids(FuType.csr), src1 = src1(WhoTakeCsr), src2 = src2(WhoTakeCsr), func = fuOpType(WhoTakeCsr))
-  csr.io.cfIn := io.in(WhoTakeCsr).bits.cf
-  csr.io.cfIn.exceptionVec(loadAddrMisaligned) := lsu.io.loadAddrMisaligned
-  csr.io.cfIn.exceptionVec(storeAddrMisaligned) := lsu.io.storeAddrMisaligned
-  csr.io.instrValid := io.in(WhoTakeCsr).valid && !io.flush
-  csr.io.isBackendException := false.B
-  for(i <- 0 to Issue_Num-1){
-    io.out(i).bits.intrNO := DontCare
-  }
-  csr.io.isBackendException := false.B
-  csr.io.out.ready := true.B
-  csr.io.imemMMU <> io.memMMU.imem
-  csr.io.dmemMMU <> io.memMMU.dmem
-
-  //connect wires
-  val empty_RedirectIO = Wire(new RedirectIO)
-  empty_RedirectIO.target := 0.U
-  empty_RedirectIO.rtype := 0.U
-  empty_RedirectIO.valid := false.B
-
-  val IcantWrite = VecInit((0 to Issue_Num-1).map(i => {val raw = Wire(Vec(Issue_Num,Bool())) 
-                                                          for(j <- 0 to i){
-                                                              raw(j) := ((lsu.io.loadAddrMisaligned || lsu.io.storeAddrMisaligned) && j.U === WhoTakeLsu) || (csr.io.wenFix && fuValids(FuType.csr) && j.U === WhoTakeCsr)
-                                                          }
-                                                          for(j <- i+1 to Issue_Num-1){
-                                                              raw(j) := false.B 
-                                                          }
-                                                          raw.reduce(_||_)
-                                                      }))
-
-  for(i <- 0 to Issue_Num-1){
-    io.out(i).bits.decode <> io.in(i).bits
-  }
-  Debug(io.out(0).fire(),"[SIMD_EXU] InstNo %x\n", io.out(0).bits.decode.InstNo)
-  for(k <- 0 to Issue_Num-1){
-    io.out(k).bits.decode.ctrl.rfWen := io.in(k).bits.ctrl.rfWen && !IcantWrite(k)
-    io.out(k).bits.decode.cf.redirect <> Mux(csr.io.redirect.valid && WhoTakeCsr === k.U, csr.io.redirect, 
-                                                Mux(alu.valid && WhoTakeAlu === k.U,alu.io.redirect,
-                                                  Mux(alu1.valid && WhoTakeAlu1 === k.U,alu1.io.redirect,empty_RedirectIO)))
-  }
-  val ExuValid = VecInit((0 to Issue_Num-1).map(k => !io.in(k).valid || io.in(k).valid && MuxLookup(fuType(k), true.B, List(FuType.lsu -> lsu.io.out.valid,FuType.mdu -> mdu.io.out.valid))
-                         )).reduce(_&&_)
-  for(i <- 0 to Issue_Num-1){
-    io.out(i).valid := Mux(io.in(i).valid,ExuValid,false.B) 
-  }
-  for(k <- 0 to Issue_Num-1){
-    io.out(k).bits.commits:= DontCare
-    io.out(k).bits.commits(FuType.alu) := aluOut
-    io.out(k).bits.commits(FuType.lsu) := lsuOut
-    io.out(k).bits.commits(FuType.csr) := csrOut
-    io.out(k).bits.commits(FuType.mdu) := mduOut
-    io.out(k).bits.commits(FuType.alu1):= alu1Out
-  }
-  for(i <- 0 to Issue_Num-1){
-      if(i == 0){
-        io.in(i).ready := VecInit((0 to Issue_Num-1).map(i => !io.in(i).valid||io.out(i).fire())).reduce(_&&_)
-      }else{
-        io.in(i).ready := false.B
-      }
-  }
-  val WAWinExu = VecInit((0 to Issue_Num-1).map(i => {val raw = Wire(Vec(Issue_Num,Bool())) 
-                                                      for(j <- 0 to i){
-                                                        raw(j) := false.B 
-                                                      }
-                                                      for(j <- i+1 to Issue_Num-1){
-                                                        raw(j) := io.in(j).valid && io.in(j).bits.ctrl.rfDest === io.in(i).bits.ctrl.rfDest && io.in(j).bits.ctrl.rfWen
-                                                      }
-                                                      raw.reduce(_||_)}))
-  for(i <- 0 to Issue_Num-1){
-    io.forward(i).valid := io.in(i).valid & io.out(i).valid
-    io.forward(i).wb.rfWen := io.in(i).bits.ctrl.rfWen && !WAWinExu(i)
-    io.forward(i).wb.rfDest := io.in(i).bits.ctrl.rfDest
-    io.forward(i).wb.rfData := MuxLookup(fuType(i),aluOut,List(FuType.alu->aluOut,FuType.alu1->alu1Out,FuType.lsu->lsuOut,FuType.csr->csrOut,FuType.mdu->mduOut))
-    io.forward(i).fuType := io.in(i).bits.ctrl.fuType
-    io.forward(i).InstNo := io.in(i).bits.InstNo
-  }
-
-  if (!p.FPGAPlatform) {
-    val cycleCnt = WireInit(0.U(64.W))
-    val instrCnt = WireInit(0.U(64.W))
-    val nutcoretrap = VecInit((0 to Issue_Num-1).map(i => io.in(i).bits.ctrl.isNutCoreTrap && io.in(i).valid)).reduce(_||_)
-
-    BoringUtils.addSink(cycleCnt, "simCycleCnt")
-    BoringUtils.addSink(instrCnt, "simInstrCnt")
-    BoringUtils.addSource(nutcoretrap, "nutcoretrap")
-
-    val difftest = Module(new DifftestTrapEvent)
-    difftest.io.clock    := clock
-    difftest.io.coreid   := 0.U // TODO: nutshell does not support coreid auto config
-    difftest.io.valid    := nutcoretrap
-    difftest.io.code     := io.in(0).bits.data.src1
-    difftest.io.pc       := io.in(0).bits.cf.pc
-    difftest.io.cycleCnt := cycleCnt
-    difftest.io.instrCnt := instrCnt
-  }
-  //Debug
-  {
-      Debug("[SIMD_EXU] valid %x pc %x futype %x \n", io.in(0).valid, io.in(0).bits.cf.pc, io.in(0).bits.ctrl.fuType)
-      for(i<- 0 to Issue_Num-1){
-      Debug("[SIMD_EXU] [Issue: %x ]TakeBranch %x BranchTo %x \n", i.U, io.out(i).bits.decode.cf.redirect.valid, io.out(i).bits.decode.cf.redirect.target)
-      }
-  }
-}
-
 class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType {
   val io = IO(new Bundle {
     val in = Vec(FuType.num,Flipped(Decoupled(new DecodeIO)))
@@ -200,9 +34,10 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
 
   for(i <- 0 to FuType.num-1){
     io.out(i).bits.decode <> io.in(i).bits
-//    io.out(i).bits.decode.ctrl.rfWen := io.in(i).bits.ctrl.rfWen
-//    io.out(i).bits.decode.cf.redirect <> empty_RedirectIO
+    io.out(i).bits.decode.ctrl.rfWen := io.in(i).bits.ctrl.rfWen
+    io.out(i).bits.decode.cf.redirect <> empty_RedirectIO
     io.out(i).bits.commits:= DontCare
+    io.out(i).bits.vector_commits:= DontCare
     io.in(i).ready := !io.in(i).valid || io.out(i).fire()
   }
 
@@ -266,10 +101,58 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     BoringUtils.addSource(simdu_firststage_fire, "simdu_fs_fire")
 
     io.out(simduidx).bits.decode <> simdu.io.DecodeOut
-//    io.out(simduidx).bits.decode.ctrl.rfWen := simdu.io.DecodeOut.ctrl.rfWen
+    io.out(simduidx).bits.decode.ctrl.rfWen := simdu.io.DecodeOut.ctrl.rfWen
     io.out(FuType.simdu).valid := simdu.io.out.valid
     io.out(FuType.simdu).bits.commits := simduOut
     io.in(simduidx).ready := simdu.io.in.ready
+  }
+
+  //SNNU
+  if(Polaris_SNN_WAY_NUM == 2){
+    val snnuidx = FuType.snnu
+    val snnu1idx = FuType.snnu1
+    val snnu = Module(new SNNU_2WAY)
+    val (snnuOut,snnu1Out) = snnu.access(valid0 = io.in(snnuidx).valid, src01 = src1(snnuidx), src02 = src2(snnuidx), func0 = fuOpType(snnuidx),valid1 = io.in(snnu1idx).valid, src11 = src1(snnu1idx), src12 = src2(snnu1idx), func1 = fuOpType(snnu1idx))
+    snnu.io.dcIn(0) := io.in(snnuidx).bits
+    snnu.io.dcIn(1) := io.in(snnu1idx).bits
+    snnu.io.out(0).ready := io.out(snnuidx).ready
+    snnu.io.out(1).ready := io.out(snnu1idx).ready
+    snnu.io.flush := io.flush
+    val snnu_firststage_fire = Wire(Bool())
+    snnu_firststage_fire := snnu.io.FirstStageFire(0)
+    BoringUtils.addSource(snnu_firststage_fire, "snnu_fs_fire")
+    val snnu1_firststage_fire = Wire(Bool())
+    snnu1_firststage_fire := snnu.io.FirstStageFire(1)
+    BoringUtils.addSource(snnu1_firststage_fire, "snnu1_fs_fire")
+    
+    io.out(snnuidx).bits.decode <> snnu.io.dcOut(0)
+    io.out(snnu1idx).bits.decode <> snnu.io.dcOut(1)
+    io.out(snnuidx).bits.decode.ctrl.rfWen := snnu.io.dcOut(0).ctrl.rfWen 
+    io.out(snnu1idx).bits.decode.ctrl.rfWen:= snnu.io.dcOut(1).ctrl.rfWen
+    io.out(FuType.snnu).valid := snnu.io.out(0).valid
+    io.out(FuType.snnu1).valid := snnu.io.out(1).valid
+    io.out(FuType.snnu).bits.commits := snnuOut
+    io.out(FuType.snnu1).bits.commits := snnu1Out
+    io.in(snnuidx).ready  := snnu.io.in(0).ready
+    io.in(snnu1idx).ready := snnu.io.in(1).ready
+    Debug("snnuidx %x \n",snnuidx)
+    Debug("snnu1idx %x \n",snnu1idx)
+  }else if(Polaris_SNN_WAY_NUM == 1){
+    val snnuidx = FuType.snnu
+    val snnu = Module(new SNNU)
+    val snnuOut = snnu.access(valid = io.in(snnuidx).valid, src1 = src1(snnuidx), src2 = src2(snnuidx), func = fuOpType(snnuidx))
+    snnu.io.out.ready := io.out(snnuidx).ready
+    snnu.io.dcIn := io.in(snnuidx).bits
+    snnu.io.flush := io.flush
+    val snnu_firststage_fire = Wire(Bool())
+    snnu_firststage_fire := snnu.io.FirstStageFire(0)
+    BoringUtils.addSource(snnu_firststage_fire, "snnu_fs_fire")
+    io.out(snnuidx).bits.decode <> snnu.io.dcOut
+    io.out(snnuidx).bits.decode.ctrl.rfWen := snnu.io.dcOut.ctrl.rfWen
+    io.out(FuType.snnu).valid := snnu.io.out.valid
+    io.out(FuType.snnu).bits.commits := snnuOut
+    io.in(snnuidx).ready := snnu.io.in.ready
+    Debug("snnuidx %x \n",snnuidx)
   }
 
   //MDU
@@ -287,7 +170,7 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   //fma
   val fmaidx = FuType.fma
   val fma = Module(new FMA)
-  val fmaOut = fma.access(valid = io.in(fmaidx).valid, src1 = src1(fmaidx), src2 = src2(fmaidx), src3 = io.in(fmaidx).bits.data.src3, func = fuOpType(fmaidx))
+  val fmaOut = fma.access(valid = io.in(fmaidx).valid && io.in(fmaidx).bits.ctrl.fuType === fmaidx, src1 = src1(fmaidx), src2 = src2(fmaidx), src3 = io.in(fmaidx).bits.data.src3, func = fuOpType(fmaidx))
   val fma_fflags = fmaOut.fflags & fflags_mask(fma.io.out.valid) | Cat(rmInvalid(fma.io.in.bits.rm), 0.U(4.W))
   fma.io.out.ready := io.out(fmaidx).ready
   fma.io.flush := io.flush
@@ -295,31 +178,29 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   //fdivsqrt
   val fdivsqrtidx = FuType.fdivsqrt
   val fdivsqrt = Module(new FDivSqrt)
-  val fdivsqrtOut = fdivsqrt.access(valid = io.in(fdivsqrtidx).valid, src1 = src1(fdivsqrtidx), src2 = src2(fdivsqrtidx), func = fuOpType(fdivsqrtidx))
+  val fdivsqrtOut = fdivsqrt.access(valid = io.in(fmaidx).valid && io.in(fmaidx).bits.ctrl.fuType === fdivsqrtidx, src1 = src1(fmaidx), src2 = src2(fmaidx), func = fuOpType(fmaidx))
   val fdivsqrt_fflags = fdivsqrtOut.fflags & fflags_mask(fdivsqrt.io.out.valid) | Cat(rmInvalid(fdivsqrt.io.in.bits.rm), 0.U(4.W))
-  fdivsqrt.io.out.ready := io.out(fdivsqrtidx).ready
+  fdivsqrt.io.out.ready := io.out(fmaidx).ready
   fdivsqrt.io.flush := io.flush
-  fdivsqrt.io.in.bits.rm := getRM(io.in(fdivsqrtidx).bits.ctrl.funct3, csr_rm)
+  fdivsqrt.io.in.bits.rm := getRM(io.in(fmaidx).bits.ctrl.funct3, csr_rm)
   //fconv
   val fconvidx = FuType.fconv
   val fconv = Module(new FCONV)
-  val fconvOut = fconv.access(valid = io.in(fconvidx).valid, src1 = src1(fconvidx), src2 = src2(fconvidx), func = fuOpType(fconvidx))
+  val fconvOut = fconv.access(valid = io.in(fmaidx).valid && io.in(fmaidx).bits.ctrl.fuType === fconvidx, src1 = src1(fmaidx), src2 = src2(fmaidx), func = fuOpType(fmaidx))
   val fconv_fflags = fconvOut.fflags & fflags_mask(fconv.io.out.valid) | Cat(rmInvalid(fconv.io.in.bits.rm), 0.U(4.W))
-  fconv.io.out.ready := io.out(fconvidx).ready
+  fconv.io.out.ready := io.out(fmaidx).ready
   fconv.io.flush := io.flush
-  fconv.io.in.bits.rm := getRM(io.in(fconvidx).bits.ctrl.funct3, csr_rm)
+  fconv.io.in.bits.rm := getRM(io.in(fmaidx).bits.ctrl.funct3, csr_rm)
   //fcomp
   val fcompidx = FuType.fcomp
   val fcomp = Module(new FCOMP)
-  val fcompOut = fcomp.access(valid = io.in(fcompidx).valid, src1 = src1(fcompidx), src2 = src2(fcompidx), func = fuOpType(fcompidx))
+  val fcompOut = fcomp.access(valid = io.in(fmaidx).valid && io.in(fmaidx).bits.ctrl.fuType === fcompidx, src1 = src1(fmaidx), src2 = src2(fmaidx), func = fuOpType(fmaidx))
   val fcomp_fflags = fcompOut.fflags & fflags_mask(fcomp.io.out.valid)
-  fcomp.io.out.ready := io.out(fcompidx).ready
+  fcomp.io.out.ready := io.out(fmaidx).ready
   fcomp.io.flush := io.flush
-  fcomp.io.in.bits.rm := getRM(io.in(fcompidx).bits.ctrl.funct3, csr_rm)
-
+  fcomp.io.in.bits.rm := getRM(io.in(fmaidx).bits.ctrl.funct3, csr_rm)
   val fpuOutValid = Seq(fma.io.out.valid, fdivsqrt.io.out.valid, fconv.io.out.valid, fcomp.io.out.valid).reduce(_||_)
   val fpu_fflags = Seq(fma_fflags, fdivsqrt_fflags, fconv_fflags, fcomp_fflags).reduce(_|_)
-
 //  for(i <- 0 to FuType.num-1){
 //    io.out(i).bits.decode.ctrl.fReg.wen := false.B
 //  }
@@ -342,12 +223,12 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
 
   //LSU
   val lsuidx = FuType.lsu
-  val BeforeLSUhasRedirect = notafter(io.in(bruidx).bits.InstNo,io.in(lsuidx).bits.InstNo,io.in(bruidx).bits.InstFlag,io.in(lsuidx).bits.InstFlag) && io.out(bruidx).bits.decode.cf.redirect.valid
+  val BeforeLSUhasRedirect = notafter(io.in(bruidx).bits.InstNo,io.in(lsuidx).bits.InstNo,io.in(bruidx).bits.InstFlag,io.in(lsuidx).bits.InstFlag)&&io.out(bruidx).bits.decode.cf.redirect.valid
   val lsu = Module(new pipeline_lsu_atom)
   lsu.io.DecodeIn := io.in(lsuidx).bits
-  val lsuOut = lsu.access(valid = io.in(lsuidx).valid && !BeforeLSUhasRedirect, src1 = src1(lsuidx), src2 = io.in(lsuidx).bits.data.imm, func = fuOpType(lsuidx))
-  lsu.io.wdata := Mux(lsu.io.DecodeIn.ctrl.fReg.src2Ren && lsu.io.DecodeIn.ctrl.fuOpType === LSUOpType.sw,
-    float.unbox(src2(lsuidx), float.fp32), src2(lsuidx))
+  val lsuOut = lsu.access(valid = io.in(lsuidx).valid && !BeforeLSUhasRedirect, src1 = src1(lsuidx), src2 = Mux(io.in(lsuidx).bits.ctrl.rfVector,src2(lsuidx),io.in(lsuidx).bits.data.imm), func = fuOpType(lsuidx))
+  val lsuVectorOut = lsu.v_access(io.in(lsuidx).bits.data.src_vector)
+  lsu.io.wdata := Mux(lsu.io.DecodeIn.ctrl.fReg.src2Ren && lsu.io.DecodeIn.ctrl.fuOpType === LSUOpType.sw,float.unbox(src2(lsuidx), float.fp32), src2(lsuidx))
   for(i <- 0 to FuType.num-1){
     io.out(i).bits.isMMIO := i.U === lsuidx && (lsu.io.isMMIO && io.out(i).valid)
   }
@@ -356,9 +237,8 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   lsu.io.out.ready := io.out(lsuidx).ready
   lsu.io.flush := io.flush
   io.out(lsuidx).bits.decode <> lsu.io.DecodeOut
-//  io.out(lsuidx).bits.decode.ctrl.rfWen := lsu.io.DecodeOut.ctrl.rfWen
-
-  val toFReg = VecInit(fmaidx, fdivsqrtidx, fconvidx, lsuidx).map(i => io.out(i).bits.decode.ctrl.fReg.wen && io.out(i).valid).reduce(_||_)
+  io.out(lsuidx).bits.decode.ctrl.rfWen := lsu.io.DecodeOut.ctrl.rfWen
+  val toFReg = io.out(fmaidx).bits.decode.ctrl.fReg.wen && io.out(fmaidx).valid
 
   //CSRU
   val csridx = FuType.csr
@@ -370,12 +250,12 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   csr.io.ctrlIn := Mux(io.in(csridx).valid, io.in(csridx).bits.ctrl,lsu.io.DecodeOut.ctrl)
   csr.io.cfIn.exceptionVec(loadAddrMisaligned) := lsu.io.loadAddrMisaligned 
   csr.io.cfIn.exceptionVec(storeAddrMisaligned) := lsu.io.storeAddrMisaligned
+  val hasLoadPF = lsu.io.loadPF//RegInit(false.B)
+  val hasStorePF= lsu.io.storePF//RegInit(false.B)
   csr.io.fpu.fflags.valid := fpuOutValid
   csr.io.fpu.fflags.bits := fpu_fflags
   csr.io.fpu.dirty_fs := toFReg
   csr_rm := csr.io.fpu.frm
-  val hasLoadPF = lsu.io.loadPF//RegInit(false.B)
-  val hasStorePF= lsu.io.storePF//RegInit(false.B)
   /*
   when(io.memMMU.dmem.loadPF){
     hasLoadPF := true.B
@@ -395,7 +275,6 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   val lsuexp = (lsu.io.loadAddrMisaligned || lsu.io.storeAddrMisaligned || hasStorePF || hasLoadPF)// && lsu.io.in.valid
   val csrfix =  csr.io.wenFix && io.in(csridx).valid
   csr.io.instrValid := (io.in(csridx).valid || lsuexp) && io.out(csridx).fire()
-  Debug(lsuexp, "loadAddrMisaligned %x storeAddrMisaligned %x hasStorePF %x hasLoadPF%x\n",lsu.io.loadAddrMisaligned, lsu.io.storeAddrMisaligned, hasStorePF, hasLoadPF)
   //csr.io.isBackendException := false.B
   for(i <- 0 to FuType.num-1){
     io.out(i).bits.intrNO := DontCare
@@ -425,22 +304,30 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   io.out(FuType.alu1).valid := io.in(alu1idx).valid
   io.out(FuType.lsu).valid := lsu.io.out.valid && !lsuexp
   io.out(FuType.mdu).valid := mdu.io.out.valid
-  io.out(FuType.fma).valid := fma.io.out.valid
-  io.out(FuType.fdivsqrt).valid := fdivsqrt.io.out.valid
-  io.out(FuType.fconv).valid := fconv.io.out.valid
-  io.out(FuType.fcomp).valid := fcomp.io.out.valid
   io.out(FuType.csr).valid := io.in(csridx).valid || lsuexp
+  io.out(FuType.fma).valid := Mux(io.in(fmaidx).bits.ctrl.fuType === fmaidx,fma.io.out.valid,
+                                                                                   Mux(io.in(fmaidx).bits.ctrl.fuType === fdivsqrtidx,fdivsqrt.io.out.valid,
+                                                                                                                                             Mux(io.in(fmaidx).bits.ctrl.fuType === fconvidx,fconv.io.out.valid,
+                                                                                                                                                                                                    fcomp.io.out.valid)))
+  //io.out(FuType.fdivsqrt).valid := fdivsqrt.io.out.valid
+  //io.out(FuType.fconv).valid := fconv.io.out.valid
+  //io.out(FuType.fcomp).valid := fcomp.io.out.valid
 
   io.out(FuType.alu).bits.commits := aluOut
-  io.out(FuType.lsu).bits.commits := Mux(io.out(lsuidx).bits.decode.ctrl.fReg.wen && lsu.io.DecodeOut.ctrl.fuOpType === LSUOpType.lw,
-    float.box(lsuOut(31, 0), float.fp64), lsuOut)
+  io.out(FuType.lsu).bits.commits := Mux(io.out(lsuidx).bits.decode.ctrl.fReg.wen && lsu.io.DecodeOut.ctrl.fuOpType === LSUOpType.lw,float.box(lsuOut(31, 0), float.fp64), lsuOut)
   io.out(FuType.csr).bits.commits := csrOut
   io.out(FuType.mdu).bits.commits := mduOut
   io.out(FuType.alu1).bits.commits:= alu1Out
-  io.out(FuType.fma).bits.commits := fmaOut.result
-  io.out(FuType.fdivsqrt).bits.commits := fdivsqrtOut.result
-  io.out(FuType.fconv).bits.commits := fconvOut.result
-  io.out(FuType.fcomp).bits.commits := fcompOut.result
+  io.out(FuType.fma).bits.commits := Mux(io.in(fmaidx).bits.ctrl.fuType === fmaidx,fmaOut.result,
+                                                                                   Mux(io.in(fmaidx).bits.ctrl.fuType === fdivsqrtidx,fdivsqrtOut.result,
+                                                                                                                                             Mux(io.in(fmaidx).bits.ctrl.fuType === fconvidx,fconvOut.result,
+                                                                                                                                                                                                    fcompOut.result)))
+  //io.out(FuType.fdivsqrt).bits.commits := fdivsqrtOut.result
+  //io.out(FuType.fconv).bits.commits := fconvOut.result
+  //io.out(FuType.fcomp).bits.commits := fcompOut.result
+
+  for(i <- 0 to FuType.num-1){io.out(i).bits.vector_commits := 0.U}
+  io.out(FuType.lsu).bits.vector_commits := lsuVectorOut
 
   io.in(lsuidx).ready := lsu.io.in.ready && !BeforeLSUhasRedirect
 
@@ -488,7 +375,7 @@ class new_SIMD_EXU(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   //Debug
   {
       for(i <- 0 to FuType.num-1){
-        Debug("[SIMD_EXU] issue %x valid %x outvalid %x pc %x futype %x instrno %x outdata %x fpWen %x\n", i.U,io.in(i).valid, io.out(i).valid,io.in(i).bits.cf.pc, io.in(i).bits.ctrl.fuType, io.out(i).bits.decode.InstNo, io.out(i).bits.commits, io.out(i).bits.decode.ctrl.fReg.wen)
+        Debug("[SIMD_EXU] issue %x valid %x outvalid %x pc %x futype %x instrno %x outdata %x \n", i.U,io.in(i).valid, io.out(i).valid,io.in(i).bits.cf.pc, io.in(i).bits.ctrl.fuType, io.out(i).bits.decode.InstNo, io.out(i).bits.commits)
       }
       for(i<- 0 to FuType.num-1){
       Debug("[SIMD_EXU] [Issue: %x ]BeforeLSUhasRedirect %x TakeBranch %x BranchTo %x \n", i.U,BeforeLSUhasRedirect, io.out(i).bits.decode.cf.redirect.valid, io.out(i).bits.decode.cf.redirect.target)

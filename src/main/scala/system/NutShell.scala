@@ -19,7 +19,7 @@ package system
 import nutcore._
 import bus.axi4.{AXI4, AXI4Lite}
 import bus.simplebus._
-import device.{AXI4CLINT, AXI4PLIC}
+import device.{AXI4CLINT, AXI4PLIC,AXI4ODIN,ODINBlackBox}
 import top.Settings
 
 import chisel3._
@@ -39,6 +39,8 @@ class ILABundle extends NutCoreBundle {
   val WBUrfDest = UInt(5.W)
   val WBUrfData = UInt(XLEN.W)
   val InstrCnt = UInt(64.W)
+  val Mode = UInt(2.W)
+  val Instr = UInt(VAddrBits.W)
 }
 
 class NutShell(implicit val p: NutCoreConfig) extends Module with HasSoCParameter {
@@ -99,6 +101,7 @@ class NutShell(implicit val p: NutCoreConfig) extends Module with HasSoCParamete
   nutcore.io.imem.coh.req.bits := DontCare
 
   val addrSpace = List(
+    //(0x37000000L, 0x00200000L), // ODIN
     (0x38000000L, 0x00010000L), // CLINT
     (0x3c000000L, 0x04000000L), // PLIC
     (Settings.getLong("MMIOBase"), Settings.getLong("MMIOSize")), // external devices
@@ -116,6 +119,10 @@ class NutShell(implicit val p: NutCoreConfig) extends Module with HasSoCParamete
   val msipSync = clint.io.extra.get.msip
   BoringUtils.addSource(mtipSync, "mtip")
   BoringUtils.addSource(msipSync, "msip")
+
+  //val odin = Module(new AXI4ODIN(sim = !p.FPGAPlatform))
+  //odin.io.in <> mmioXbar.io.out(0).toAXI4Lite()
+  //BoringUtils.addSource(clock.asBool, "clock")
 
   val plic = Module(new AXI4PLIC(nrIntr = Settings.getInt("NrExtIntr"), nrHart = 1))
   plic.io.in <> mmioXbar.io.out(1).toAXI4Lite()
@@ -140,5 +147,8 @@ class NutShell(implicit val p: NutCoreConfig) extends Module with HasSoCParamete
     BoringUtilsConnect(ila.WBUrfDest  ,"ilaWBUrfDest")
     BoringUtilsConnect(ila.WBUrfData  ,"ilaWBUrfData")
     BoringUtilsConnect(ila.InstrCnt   ,"ilaInstrCnt")
+    BoringUtilsConnect(ila.Mode       ,"ilaMode")
+    BoringUtilsConnect(ila.Instr      ,"ilaInstr")
   }
+ 
 }

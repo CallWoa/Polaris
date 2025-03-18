@@ -238,10 +238,10 @@ class SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with SIMD_Ha
     MaskedRegMap(Pmpcfg1, pmpcfg1),
     MaskedRegMap(Pmpcfg2, pmpcfg2),
     MaskedRegMap(Pmpcfg3, pmpcfg3),
-    MaskedRegMap(PmpaddrBase + 0, pmpaddr0,"h3ffffffff".U),
-    MaskedRegMap(PmpaddrBase + 1, pmpaddr1,"h3fffffc00".U),
-    MaskedRegMap(PmpaddrBase + 2, pmpaddr2,"h3fffffc00".U),
-    MaskedRegMap(PmpaddrBase + 3, pmpaddr3,"h3fffffc00".U),
+    MaskedRegMap(PmpaddrBase + 0, pmpaddr0,"h3fffffff".U),
+    MaskedRegMap(PmpaddrBase + 1, pmpaddr1,"h3fffffff".U),
+    MaskedRegMap(PmpaddrBase + 2, pmpaddr2,"h3fffffff".U),
+    MaskedRegMap(PmpaddrBase + 3, pmpaddr3,"h3fffffff".U),
 
     //p-ext
     MaskedRegMap(VXSAT,vxsat,1.U,MaskedRegMap.NoSideEffect,1.U)
@@ -503,6 +503,7 @@ class new_CSRIO extends FunctionUnitIO {
   val wenFix = Output(Bool())
 }
 
+
 class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with HasCSRConst{
   val io = IO(new new_CSRIO)
 
@@ -513,7 +514,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     this.src2 := src2
     this.src3 := DontCare
     this.func := func
-    this.isMou := isMou
+    this.isMou:= isMou
     io.out.bits
   }
 
@@ -577,7 +578,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   var extList = List('a', 's', 'i', 'u')
   if(HasMExtension){ extList = extList :+ 'm'}
   if(HasCExtension){ extList = extList :+ 'c'}
-  val misaInitVal = 1.U << 63 | 0x141105.U //getMisaMxl(2) | extList.foldLeft(0.U)((sum, i) => sum | getMisaExt(i)) //"h8000000000141105".U 
+  val misaInitVal = 1.U << 63 | 0x14112d.U //getMisaMxl(2) | extList.foldLeft(0.U)((sum, i) => sum | getMisaExt(i)) //"h8000000000141112".U
   val misa = RegInit(UInt(XLEN.W), misaInitVal) 
   // MXL = 2          | 0 | EXT = b 00 0000 0100 0001 0001 0000 0101
   // (XLEN-1, XLEN-2) |   |(25, 0)  ZY XWVU TSRQ PONM LKJI HGFE DCBA
@@ -632,11 +633,9 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     val fflags = UInt(5.W)
     assert(this.getWidth == XLEN)
   }
-
   val fcsr = RegInit(0.U(XLEN.W))
   // set mstatus->sd and mstatus->fs when true
   val csrw_dirty_fp_state = WireInit(false.B)
-
   def frm_wfn(wdata: UInt): UInt = {
     val fcsrOld = WireInit(fcsr.asTypeOf(new FcsrStruct))
     csrw_dirty_fp_state := true.B
@@ -682,6 +681,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   val isIllegalMode  = wen && priviledgeMode < addr(9, 8)
   val justRead = (func === CSROpType.set || func === CSROpType.seti) && src1 === 0.U  // csrrs and csrrsi are exceptions when their src1 is zero
   val isIllegalWrite = wen && (addr(11, 10) === "b11".U) && !justRead  // Write a read-only CSR register
+
   val RegWen = wen && !isIllegalWrite && !isIllegalMode
   val isIllegalAddr = WireInit(false.B)
   val resetSatp = WireInit(false.B)
@@ -691,7 +691,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     when(RegWen){mstatus := Cat(tmp.asTypeOf(new MstatusStruct).fs === "b11".U, tmp(XLEN-2,0))}
   }.elsewhen(addr === Sie.U){
     rdata := mie & sieMask
-    when(RegWen && io.cfIn.pc =/= "h80001f04".U){mie := (mie & ~sieMask)|(wdata & sieMask)}
+    when(RegWen){mie := (mie & ~sieMask)|(wdata & sieMask)}
   }.elsewhen(addr === Stvec.U){
     rdata := stvec
     when(RegWen){stvec := wdata}
@@ -766,26 +766,26 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     rdata := pmpcfg3
     when(RegWen){pmpcfg3 := wdata}
   }.elsewhen(addr === (PmpaddrBase + 0).U){
-    rdata := pmpaddr0
-    val pmpaddr0Mask = "h3ffffffff".U
+    rdata := Mux((pmpcfg0 & "h18".U) < "h18".U,pmpaddr0 & "hFFFFFFFFFFFFFC00".U ,pmpaddr0 | "h1FF".U)
+    val pmpaddr0Mask = "h3fffffff".U
     when(RegWen){pmpaddr0 := (wdata & pmpaddr0Mask) | (pmpaddr0 & ~pmpaddr0Mask)}
   }.elsewhen(addr === (PmpaddrBase + 1).U){
-    rdata := pmpaddr1
-    val pmpaddr1Mask = "h3fffffc00".U
+    rdata := Mux((pmpcfg1 & "h18".U) < "h18".U,pmpaddr1 & "hFFFFFFFFFFFFFC00".U ,pmpaddr1 | "h1FF".U)
+    val pmpaddr1Mask = "h3fffffff".U
     when(RegWen){pmpaddr1 := (wdata & pmpaddr1Mask) | (pmpaddr1 & ~pmpaddr1Mask)}
   }.elsewhen(addr === (PmpaddrBase + 2).U){
-    rdata := pmpaddr2
-    val pmpaddr2Mask = "h3fffffc00".U
+    rdata := Mux((pmpcfg2 & "h18".U) < "h18".U,pmpaddr2 & "hFFFFFFFFFFFFFC00".U ,pmpaddr2 | "h1FF".U)
+    val pmpaddr2Mask = "h3fffffff".U
     when(RegWen){pmpaddr2 := (wdata & pmpaddr2Mask) | (pmpaddr2 & ~pmpaddr2Mask)}
   }.elsewhen(addr === (PmpaddrBase + 3).U){
-    rdata := pmpaddr3
-    val pmpaddr3Mask = "h3fffffc00".U
+    rdata := Mux((pmpcfg3 & "h18".U) < "h18".U,pmpaddr3 & "hFFFFFFFFFFFFFC00".U ,pmpaddr3 | "h1FF".U)
+    val pmpaddr3Mask = "h3fffffff".U
     when(RegWen){pmpaddr3 := (wdata & pmpaddr3Mask) | (pmpaddr3 & ~pmpaddr3Mask)}
   }.elsewhen(addr === VXSAT.U){
     rdata := vxsat & 1.U
     when(RegWen){vxsat := (wdata & 1.U)}
   }.elsewhen(addr === Sip.U){
-    rdata := mipWire.asUInt | mipReg
+    rdata := (mipWire.asUInt | mipReg) & sipMask
     when(RegWen){mipReg := (wdata & sipMask) | (mipReg & ~sipMask)}
   }.elsewhen(addr === Mip.U){
     rdata := mipWire.asUInt | mipReg
@@ -804,11 +804,11 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     isIllegalAddr:= wen
   }
 
-  when(RegNext(io.fpu.fflags.valid)) {
-    fcsr := fflags_wfn(update = true)(RegNext(io.fpu.fflags.bits))
+  when(io.fpu.fflags.valid) {
+    fcsr := fflags_wfn(update = true)(io.fpu.fflags.bits)
   }
   // set fs and sd in mstatus
-  when(csrw_dirty_fp_state || RegNext(io.fpu.dirty_fs)) {
+  when(csrw_dirty_fp_state || io.fpu.dirty_fs) {
     val mstatusNew = WireInit(mstatus.asTypeOf(new MstatusStruct))
     mstatusNew.fs := "b11".U
     mstatusNew.sd := true.B
@@ -853,7 +853,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
   csrExceptionVec(loadPageFault) := io.dmemMMU.loadPF || io.cfIn.exceptionVec(loadPageFault)
   csrExceptionVec(storePageFault) := io.dmemMMU.storePF || io.cfIn.exceptionVec(storePageFault)
   val raiseException = csrExceptionVec.asUInt.orR 
-  val exceptionNO = ExcPriority.map(i => i.U).reduceLeft((x,y)=>Mux(csrExceptionVec(x),x,y))
+  val exceptionNO = ExcPriority.foldRight(0.U)((i: Int, sum: UInt)=>Mux(csrExceptionVec(i), i.U, sum))
 
   //merge interrupts and exceptions
   val raiseExceptionIntr = (raiseException || raiseIntr) && io.instrValid && !isMou
@@ -955,7 +955,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
 
   //connect exu
   io.in.ready := true.B
-  io.out.valid := valid
+  io.out.valid := valid && !io.ctrlIn.isNutCoreTrap
   io.out.bits := rdata
   io.wenFix := raiseException && valid && !isMou
   io.redirect.valid := (valid && (JumpType || isMou)) || raiseExceptionIntr || resetSatp
@@ -988,6 +988,10 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     lrAddr := setLrAddr
   }
 
+  when(raiseExceptionIntr || isRet){
+    lr := false.B
+  }
+
   if (!p.FPGAPlatform) {
 
     // for differential testing
@@ -1012,6 +1016,7 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     difftest.io.sscratch := RegNext(sscratch)
     difftest.io.mideleg := RegNext(mideleg)
     difftest.io.medeleg := RegNext(medeleg)
+    //difftest.io.vxsat := vxsat
 
     val difftestArchEvent = Module(new DifftestArchEvent)
     difftestArchEvent.io.clock := clock
@@ -1021,6 +1026,8 @@ class new_SIMD_CSR(implicit val p: NutCoreConfig) extends NutCoreModule with Has
     difftestArchEvent.io.exceptionPC := RegNext(RegNext(SignExt(io.cfIn.pc, XLEN)))
     difftestArchEvent.io.exceptionInst := RegNext(RegNext(io.cfIn.instr))
 
+  }else{
+    BoringUtils.addSource(priviledgeMode,"ilaMode")
   }
 
 }

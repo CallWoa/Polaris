@@ -45,15 +45,15 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
   val src1fpRen :: src2fpRen :: src3fpRen :: fpWen :: Nil =
     ListLookup(instr, FInstructions.DecodeDefault, FInstructions.FExtraDecodeTable)
 
+
   io.out.bits := DontCare
 
   io.out.bits.ctrl.fuType := fuType
-  io.out.bits.ctrl.fuOpType := fuOpType
+  io.out.bits.ctrl.fuOpType := (if(Polaris_Vector_LDST){Mux(isInstrPLS(instrType),instr(31,25),fuOpType)}else{fuOpType})
   io.out.bits.ctrl.fReg.wen := Mux(isRVC, rvcFpWen, fpWen)
   io.out.bits.ctrl.fReg.src1Ren := src1fpRen
   io.out.bits.ctrl.fReg.src2Ren := Mux(isRVC, rvcSrc2FpRen, src2fpRen)
   io.out.bits.ctrl.fReg.src3Ren := src3fpRen
-
 
   io.out.bits.ctrl.funct3 := instr(14,12)
   io.out.bits.ctrl.func24 := instr(24)
@@ -74,7 +74,13 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
     InstrPM-> (SrcType.reg, SrcType.reg),
     InstrPRD->(SrcType.reg, SrcType.reg),
     InstrIZ-> (SrcType.reg, SrcType.imm),
-    InstrR4 ->(SrcType.reg, SrcType.reg)
+    InstrR4 ->(SrcType.reg, SrcType.reg),
+    InstrPLDR->(SrcType.reg, SrcType.reg),
+    InstrPSTR->(SrcType.reg, SrcType.reg),
+    InstrPLDI->(SrcType.reg, SrcType.imm),
+    InstrPSTI->(SrcType.reg, SrcType.imm),
+    InstrIZ-> (SrcType.reg, SrcType.imm),
+    InstrSNN->(SrcType.reg, SrcType.reg)
   )
   val src1Type = LookupTree(instrType, SrcTypeTable.map(p => (p._1, p._2._1)))
   val src2Type = LookupTree(instrType, SrcTypeTable.map(p => (p._1, p._2._2)))
@@ -110,7 +116,7 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
                     ||instr(26,25) === "b10".U  && instr(14,12) === "b101".U   && instr(6,0) === "b0111011".U //fsrw
                     ||instrType === InstrR4
                     )
-  val insb   = fuOpType === "b1010110".U && instr(24,23) === "b00".U && instr(14,12) === "b000".U
+  val insb         = fuOpType === "b1010110".U && instr(24,23) === "b00".U && instr(14,12) === "b000".U
   val rfSrc1 = Mux(isRVC, rvc_src1, rs)
   val rfSrc2 = Mux(isRVC, rvc_src2, rt)
   val rfDest = Mux(isRVC, rvc_dest, rd)
@@ -121,7 +127,8 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
   io.out.bits.ctrl.rfSrc2 := Mux(src2Type === SrcType.reg, rfSrc2, 0.U)
   io.out.bits.ctrl.rfSrc3 := rfSrc3
   io.out.bits.ctrl.rfWen  := isrfWen(instrType)
-  io.out.bits.ctrl.rfDest := Mux(isrfWen(instrType), rfDest, 0.U)
+  io.out.bits.ctrl.rfVector := (if(Polaris_Vector_LDST){isInstrPLS(instrType)}else{false.B})
+  io.out.bits.ctrl.rfDest := (if(Polaris_Vector_LDST){Mux(isrfWen(instrType) || isInstrPLS(instrType), rfDest, 0.U)}else{Mux(isrfWen(instrType), rfDest, 0.U)})
 
   io.out.bits.data := DontCare
   val imm = LookupTree(instrType, List(
@@ -133,7 +140,9 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
     InstrJ  -> SignExt(Cat(instr(31), instr(19, 12), instr(20), instr(30, 21), 0.U(1.W)), XLEN),
     InstrPI -> SignExt(instr(25,20),XLEN),
     InstrPB -> SignExt(instr(25,20),XLEN),
-    InstrIZ -> ZeroExt(instr(31,15),XLEN)
+    InstrPLDI -> SignExt(instr(24,20),XLEN),
+    InstrPSTI -> SignExt(instr(24,20),XLEN),
+    InstrIZ -> ZeroExt(instr(31,15), XLEN)
   ))
   val immrvc = LookupTree(rvcImmType, List(
     // InstrIW -> Cat(Fill(20+32, instr(31)), instr(31, 20)),//fixed
@@ -153,7 +162,7 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
     RVCInstr.ImmADDI  -> SignExt(Cat(instr(12), instr(6,2)), XLEN),
     RVCInstr.ImmADDI16SP-> SignExt(Cat(instr(12), instr(4,3), instr(5), instr(2), instr(6), 0.U(4.W)), XLEN),
     RVCInstr.ImmADD4SPN-> ZeroExt(Cat(instr(10,7), instr(12,11), instr(5), instr(6), 0.U(2.W)), XLEN),
-    RVCInstr.ImmCBREAK -> 1.U(XLEN.W)
+    RVCInstr.ImmCBREAK -> (1.U(XLEN.W) << 5)
     // ImmFLWSP  -> 
     // ImmFLDSP  -> 
   ))
@@ -219,9 +228,7 @@ class Decoder(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstr
   io.out.bits.ctrl.isNutCoreTrap := (instr === NutCoreTrap.TRAP) && io.in.valid
   io.isWFI := (instr === Priviledged.WFI) && io.in.valid
   io.isBranch := VecInit(RV32I_BRUInstr.table.map(i => i._2.tail(1) === fuOpType)).asUInt.orR && fuType === FuType.bru
-  Debug("!!!!IDU!!!! out_valid %x out_ready %x pc %x\n",io.out.valid, io.out.ready, io.in.bits.pc)
   Debug("!!!!IDU!!!! inst %x fuType %x fuOpType %x isBranch %x \n",instr,fuType,fuOpType,io.isBranch)
-  Debug("!!!!FLOAT!!!! src1fpRen %x src2fpRen %x src3fpRen %x fpWen %x \n",src1fpRen,src2fpRen,src3fpRen,fpWen)
 }
 
 class IDU(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType {
@@ -244,6 +251,7 @@ class IDU(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType
   val checkpoint_id = RegInit(0.U(64.W))
 
   // debug runahead
+  if (!p.FPGAPlatform) {
   val runahead = Module(new DifftestRunaheadEvent)
   runahead.io := DontCare
   runahead.io.clock         := clock
@@ -254,6 +262,7 @@ class IDU(implicit val p: NutCoreConfig) extends NutCoreModule with HasInstrType
   runahead.io.checkpoint_id := checkpoint_id
   when(runahead.io.valid && runahead.io.branch) {
     checkpoint_id := checkpoint_id + 1.U // allocate a new checkpoint_id
+  }
   }
   io.out(0).bits.cf.isBranch := decoder1.io.isBranch
   io.out(0).bits.cf.runahead_checkpoint_id := checkpoint_id

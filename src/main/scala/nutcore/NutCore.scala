@@ -25,12 +25,12 @@ import bus.axi4._
 import utils._
 import top.Settings
 
-trait HasNutCoreParameter {
+trait HasNutCoreParameter extends HasLSUConst{
   // General Parameter for NutShell
   val XLEN = if (Settings.get("IsRV32")) 32 else 64
-  val HasFPU = true
   val HasMExtension = true
   val HasCExtension = Settings.get("EnableRVC")
+  val HasFPU = true
   val HasDiv = true
   val HasIcache = Settings.get("HasIcache")
   val HasDcache = Settings.get("HasDcache")
@@ -51,12 +51,14 @@ trait HasNutCoreParameter {
   val EnableOutOfOrderMemAccess = false // enable out of order mem access will improve OoO backend's performance
   //parameter for SIMD backend
   val Issue_Num = Settings.getInt("Issue_Num")
-  val Queue_num = 32
+  val Queue_num = 32 //必须为2的幂指数
   val Polaris_Independent_Bru = Settings.getInt("Polaris_Independent_Bru") //0 or 1
   val Polaris_SIMDU_WAY_NUM = Settings.getInt("Polaris_SIMDU_WAY_NUM")   //1 or 2
-  val Forward_num = 4 + Polaris_SIMDU_WAY_NUM + 4
-  val Commit_num = 3
-  
+  val Polaris_Vector_LDST = Settings.get("Polaris_Vector_LDST")
+  val Polaris_SNN_WAY_NUM = Settings.getInt("Polaris_SNN_WAY_NUM")         // 1 or 2
+  val Forward_num = 4 /*+ Polaris_SIMDU_WAY_NUM + Polaris_SNN_WAY_NUM + (if(Polaris_Vector_LDST)(vector_rdata_width/XLEN -1 + vector_rdata_width/XLEN -1)else(0)) + 4*/
+  val Commit_num = 2
+  val Polaris_RegBanks = Settings.get("Polaris_RegBanks") //0 or 1
 }
 
 trait HasNutCoreConst extends HasNutCoreParameter {
@@ -70,7 +72,7 @@ trait HasNutCoreLog { this: RawModule =>
   implicit val moduleName: String = this.name
 }
 
-abstract class NutCoreModule extends Module with HasNutCoreParameter with HasNutCoreConst with HasExceptionNO with HasBackendConst with HasNutCoreLog
+abstract class NutCoreModule extends Module with HasNutCoreParameter with HasNutCoreConst with HasExceptionNO with HasBackendConst with HasNutCoreLog with HasLSUConst
 abstract class NutCoreBundle extends Bundle with HasNutCoreParameter with HasNutCoreConst with HasBackendConst
 
 case class NutCoreConfig (
@@ -86,7 +88,7 @@ object AddressSpace extends HasNutCoreParameter {
   // address out of MMIO will be considered as DRAM
   def mmio = List(
     //(0x02000000L,0x00010000L),
-    (0x00000000L, 0x40000000L),  // internal devices, such as CLINT and PLIC
+    (0x30000000L, 0x10000000L),  // internal devices, such as CLINT and PLIC
     (Settings.getLong("MMIOBase"), Settings.getLong("MMIOSize")) // external devices
   )
 
@@ -164,12 +166,14 @@ class NutCore(implicit val p: NutCoreConfig) extends NutCoreModule {
 
     val itlb = EmbeddedTLB(in = frontend.io.imem, mem = dmemXbar.io.in(1), flush = frontend.io.flushVec(0) | frontend.io.bpFlush, csrMMU = backend.io.memMMU.imem, enable = HasITLB)(TLBConfig(name = "itlb", userBits = ICacheUserBundleWidth, totalEntry = 8))
     frontend.io.ipf := itlb.io.ipf
-    io.imem <> Cache(in = itlb.io.out, mmio = mmioXbar.io.in.take(1), flush = Fill(2, frontend.io.flushVec(0) | frontend.io.bpFlush), empty = itlb.io.cacheEmpty, enable = HasIcache)(CacheConfig(ro = true, name = "icache", userBits = ICacheUserBundleWidth))
+    // io.imem <> Cache(in = itlb.io.out, mmio = mmioXbar.io.in.take(1), flush = Fill(2, frontend.io.flushVec(0) | frontend.io.bpFlush), empty = itlb.io.cacheEmpty, enable = HasIcache)(CacheConfig(ro = true, name = "icache", userBits = ICacheUserBundleWidth))
+    io.imem <> MBCache(in = itlb.io.out, mmio = mmioXbar.io.in.take(1), flush = Fill(2, frontend.io.flushVec(0) | frontend.io.bpFlush), empty = itlb.io.cacheEmpty, enable = HasIcache)(MBCacheConfig(ro = true, name = "icache", userBits = ICacheUserBundleWidth))
     
     // dtlb
-    val dtlb = EmbeddedTLB(in = backend.io.dmem, mem = dmemXbar.io.in(2), flush = backend.io.flush(0), csrMMU = backend.io.memMMU.dmem, enable = HasDTLB)(TLBConfig(name = "dtlb", totalEntry = 128))
+    val dtlb = EmbeddedTLB(in = backend.io.dmem, mem = dmemXbar.io.in(2), flush = backend.io.flush(0), csrMMU = backend.io.memMMU.dmem, enable = HasDTLB)(TLBConfig(name = "dtlb", totalEntry = 32))
     dmemXbar.io.in(0) <> dtlb.io.out
-    io.dmem <> Cache(in = dmemXbar.io.out, mmio = mmioXbar.io.in.drop(1), flush = "b00".U, empty = dtlb.io.cacheEmpty, enable = HasDcache)(CacheConfig(ro = false, name = "dcache"))
+    // io.dmem <> Cache(in = dmemXbar.io.out, mmio = mmioXbar.io.in.drop(1), flush = "b00".U, empty = dtlb.io.cacheEmpty, enable = HasDcache)(CacheConfig(ro = false, name = "dcache"))
+    io.dmem <> MBCache(in = dmemXbar.io.out, mmio = mmioXbar.io.in.drop(1), flush = "b00".U, empty = dtlb.io.cacheEmpty, enable = HasDcache)(MBCacheConfig(ro = false, name = "dcache"))
 
     // redirect
     frontend.io.redirect <> backend.io.redirect

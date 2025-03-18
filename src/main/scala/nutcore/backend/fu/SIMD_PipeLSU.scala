@@ -7,7 +7,7 @@ import utils._
 import bus.simplebus._
 import top.Settings
 
-class SIMD_Pipelsu_Bundle extends NutCoreBundle with HasNutCoreParameter {
+class SIMD_Pipelsu_Bundle extends NutCoreBundle with HasNutCoreParameter with HasLSUConst{
   val isMMIO = Output(Bool())
   val loadAddrMisaligned = Output(Bool()) // TODO: refactor it for new backend
   val storeAddrMisaligned = Output(Bool()) // TODO: refactor it for new backend
@@ -20,6 +20,8 @@ class SIMD_Pipelsu_Bundle extends NutCoreBundle with HasNutCoreParameter {
   val src2 = Output(UInt(XLEN.W))
   val func = Output(FuOpType())
   val addr = Output(UInt(XLEN.W))
+  val vwdata=Output(UInt(vector_wdata_width.W))
+  val vrdata=Output(UInt(vector_rdata_width.W))
 }
 class SIMD_Pipelsu_IO  extends NutCoreBundle{
   val in = Flipped(Decoupled(new SIMD_Pipelsu_Bundle))
@@ -27,16 +29,21 @@ class SIMD_Pipelsu_IO  extends NutCoreBundle{
   val dmem = new SimpleBusUC(addrBits = VAddrBits)
   val flush = Input(Bool())
 }
-class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
+class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst with HasNutCoreParameter{
   val io = IO(new SIMD_Pipelsu_IO)
   val (valid, src1, src2, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.func)
   
   val exec_valid = WireInit(false.B)
-  val exec_finish = WireInit(false.B)
-  val exec_addr = WireInit(src1)
-  val exec_func = WireInit(func)
+  val exec_finish= WireInit(false.B)
+  val exec_addr  = WireInit(src1)
+  val exec_func  = WireInit(func)
   val exec_wdata = WireInit(io.in.bits.wdata)
   val exec_clear = WireInit(false.B)
+  val exec_vstep = WireInit(0.U(VAddrBits.W))
+  val exec_vwdata= WireInit(io.in.bits.vwdata)
+  val exec_velen = WireInit(func(1,0)) //0123 分别对应 8  16  32  64
+  val exec_vxlen = WireInit(func(3,2))// 012  分别对应 64 128 256
+  val exec_vecEnable = WireInit(false.B)
   io.out.bits := io.in.bits
 
   // PF signal from TLB
@@ -54,19 +61,34 @@ class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
 
   // LSU control FSM
   val state = RegInit(s_idle)
-  io.out.valid               := false.B
-  io.in.ready                := io.out.fire() || !io.in.valid
+  when(io.flush){state := s_idle}
+  io.out.valid         := false.B
+  io.in.ready          := io.out.fire() || !io.in.valid
+  val rfVector          = io.in.bits.Decode.ctrl.rfVector
   switch (state) {
     is(s_idle){ // calculate address 
-      exec_valid := io.in.valid
-      exec_addr  := src1 + src2
-      exec_func  := func
-      exec_wdata := io.in.bits.wdata
-      exec_clear := io.out.ready
-      io.out.valid  := exec_finish
-      state := s_idle
+      when(!rfVector){
+        exec_valid := io.in.valid
+        exec_addr  := src1 + src2
+        exec_func  := func
+        exec_wdata := io.in.bits.wdata
+        exec_clear := io.out.ready
+        io.out.valid  := exec_finish
+        state := s_idle
+      }.otherwise{
+        exec_valid := io.in.valid
+        exec_vecEnable := true.B
+        exec_addr  := Mux(func(5), src1, src1+src2)
+        exec_vstep := Mux(func(5), src2, 1.U(VAddrBits.W) << exec_velen)
+        exec_func  := func
+        exec_wdata := io.in.bits.wdata
+        exec_clear := io.out.ready
+        io.out.valid  := exec_finish
+        state := s_idle
+      }
     } 
   }
+  Debug("exec_addr %x src1 %x src2 %x rfVector %x func %x\n",exec_addr,src1,src2,rfVector,func)
 
   Debug("[stage1] state %x inv %x inr %x func %x\n", state, io.in.valid, io.in.ready,func)
 
@@ -79,9 +101,6 @@ class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
   io.out.bits.isMMIO := (mmioReg || lsuMMIO)
 
   Debug("lsuMMIO %x mmioReg %x io.isMMIO %x \n",lsuMMIO,mmioReg,io.out.bits.isMMIO)
-
-  when(io.flush){state := s_idle}
-  when(!io.in.valid || io.out.fire()){io.in.ready := true.B}
 
   def genWmask(addr: UInt, sizeEncode: UInt): UInt = {
   LookupTree(sizeEncode, List(
@@ -116,9 +135,7 @@ class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
   }
   
   val dmem = io.dmem
-  val addrLatch = RegNext(exec_addr)
-  val isStore = exec_valid && LSUOpType.isStore(exec_func)
-  val partialLoad = !isStore && (exec_func =/= LSUOpType.ld)
+  val isStore = exec_valid && Mux(exec_vecEnable,func(6),LSUOpType.isStore(exec_func))
 
   val s_init :: s_wait_tlb :: s_wait_resp :: Nil = Enum(3)
   val req_state = RegInit(s_init)
@@ -150,14 +167,19 @@ class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
     "b10".U   -> (exec_addr(1,0) === 0.U), //w
     "b11".U   -> (exec_addr(2,0) === 0.U)  //d
   ))
-  val hasloadAddrMisaligned = exec_valid && !isStore && !addrAligned
-  val hasstoreAddrMisaligned= exec_valid &&  isStore && !addrAligned
+  val hasloadAddrMisaligned = exec_valid && !isStore && !addrAligned && !rfVector
+  val hasstoreAddrMisaligned= exec_valid &&  isStore && !addrAligned && !rfVector
   dmem.req.bits.apply(
     addr = reqAddr, 
     size = size, 
     wdata = reqWdata,
     wmask = reqWmask,
     cmd = Mux(isStore, SimpleBusCmd.write, SimpleBusCmd.read))
+  dmem.req.bits.vector.vecEnable:=exec_vecEnable
+  dmem.req.bits.vector.vwdata := exec_vwdata
+  dmem.req.bits.vector.vstep  := exec_vstep
+  dmem.req.bits.vector.velen  := exec_velen
+  dmem.req.bits.vector.vxlen  := exec_vxlen
   dmem.req.valid := exec_valid && (req_state === s_init) && !hasloadAddrMisaligned && !hasstoreAddrMisaligned && !io.flush
   dmem.resp <> DontCare
   
@@ -198,8 +220,9 @@ class pipeline_lsu_stage1 extends NutCoreModule with HasLSUConst {
     io.in.ready := false.B
   }
   io.out.bits.addr := exec_addr
-}
+  
 
+}
 class pipeline_lsu_stage2 extends NutCoreModule with HasLSUConst {
   val io = IO(new SIMD_Pipelsu_IO)
   val (valid, src1, src2, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.func)
@@ -211,6 +234,8 @@ class pipeline_lsu_stage2 extends NutCoreModule with HasLSUConst {
   val exec_wdata = WireInit(io.in.bits.wdata)
   val exec_clear = WireInit(false.B)
   val exec_result = WireInit(0.U(64.W))
+  val exec_vrdata= WireInit(io.dmem.resp.bits.vector.vrdata)
+  val exec_vecEnable = io.in.bits.Decode.ctrl.rfVector
   io.out.bits := io.in.bits
 
   // LSU control FSM state
@@ -231,9 +256,10 @@ class pipeline_lsu_stage2 extends NutCoreModule with HasLSUConst {
       state := s_idle
     } 
   }
-  Debug("[stage2] state %x invalid %x inready %x func %x\n", state, io.in.valid, io.in.ready,func)
+  
 
   io.out.bits.result := exec_result
+  io.out.bits.vrdata := exec_vrdata
 
   Debug("stage2 : lsuMMIO %x \n",io.out.bits.isMMIO)
 
@@ -248,11 +274,16 @@ class pipeline_lsu_stage2 extends NutCoreModule with HasLSUConst {
   val isStore = exec_valid && LSUOpType.isStore(exec_func)
   val partialLoad = !isStore && (exec_func =/= LSUOpType.ld)
   val rdata = dmem.resp.bits.rdata
+  val vrdata= dmem.resp.bits.vector.vrdata
   val rdatacache = RegEnable(rdata,dmem.resp.fire())
+  val vrdatacache= RegEnable(vrdata,dmem.resp.fire())
   val rdataLatch = Mux(req_state === s_wait_fire,rdatacache,rdata)
+  val vrdataLatch= Mux(req_state === s_wait_fire,vrdatacache,vrdata)
   dmem.resp.ready := true.B
   dmem.req <> DontCare
+  Debug("[stage2] req_state %x invalid %x inready %x func %x\n", req_state, io.in.valid, io.in.ready,func)
   Debug("[stage2] dmemrespvalid %x dmemrespready %x\n", dmem.resp.valid,dmem.resp.ready)
+  Debug("[stage2] rdatacache %x rdata %x partialLoad %x\n", rdatacache,rdata,partialLoad)
   val rdataSel64 = LookupTree(addrLatch(2, 0), List(
     "b000".U -> rdataLatch(63, 0),
     "b001".U -> rdataLatch(63, 8),
@@ -291,7 +322,8 @@ class pipeline_lsu_stage2 extends NutCoreModule with HasLSUConst {
     is (s_wait_fire) { when(exec_finish && exec_clear){req_state := s_wait_resp }}
   }
 
-  exec_result := Mux(partialLoad, rdataPartialLoad, rdataLatch(XLEN-1,0))
+  exec_result := Mux(exec_vecEnable, exec_vrdata(XLEN-1,0),Mux(partialLoad, rdataPartialLoad, rdataLatch(XLEN-1,0)))
+  exec_vrdata := vrdataLatch
   exec_finish := Mux(req_state === s_wait_fire, true.B, dmem.resp.fire())
   
   dmem.resp.ready := true.B
@@ -314,8 +346,10 @@ class pipeline_lsu_empty_stage extends NutCoreModule with HasLSUConst{
   io.out.bits := io.in.bits
   io.dmem <> DontCare
 }
-class new_SIMD_LSU_IO extends FunctionUnitIO {
+class new_SIMD_LSU_IO extends FunctionUnitIO with HasLSUConst{
   val wdata = Input(UInt(XLEN.W))
+  val vwdata = Input(UInt(vector_wdata_width.W))
+  val vrdata = Output(UInt(vector_rdata_width.W))
   val dmem = new SimpleBusUC(addrBits = VAddrBits)
   val isMMIO = Output(Bool())
   val loadAddrMisaligned = Output(Bool()) // TODO: refactor it for new backend
@@ -369,7 +403,7 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
     BoringUtils.addSink(lr, "lr")
     BoringUtils.addSink(lrAddr, "lr_addr")
 
-    val scInvalid = !(src1 === lrAddr) && scReq
+    val scInvalid = !(src1 === lrAddr && lr) && scReq
     Debug("setLr %x setLrVal %x setLrAddr %x lr %x lrAddr %x src1 %x\n",setLr,setLrVal,setLrAddr,lr,lrAddr,src1)
 
     // PF signal from TLB
@@ -495,11 +529,13 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
   Debug("[LSU-AGU] state %x atomReq %x func %x outvalid %x exec_finish %x\n", state, atomReq, func,io.out.valid,exec_finish)
 
     //Set LR/SC bits
-    setLr := io.out.fire() && (lrReq || scReq)
+    setLr := io.out.fire() && (lrReq || scReq) && !(io.out.bits.storePF || io.out.bits.loadPF || io.out.bits.loadAddrMisaligned || io.out.bits.storeAddrMisaligned)
     setLrVal := lrReq
     setLrAddr := src1
 
     io.out.bits.result := Mux(scReq, scInvalid, Mux(state === s_amo_s, atomRegReg, exec_result))
+    io.out.bits.vrdata := 0.U
+    io.out.bits.vwdata := 0.U
 
     val lsuMMIO = WireInit(false.B)
     BoringUtils.addSink(lsuMMIO, "lsuMMIO")
@@ -582,6 +618,7 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
     wdata = reqWdata,
     wmask = reqWmask,
     cmd = Mux(isStore, SimpleBusCmd.write, SimpleBusCmd.read))
+  dmem.req.bits.vector := DontCare
   dmem.req.valid := exec_valid && (req_state === s_init) && !io.out.bits.loadAddrMisaligned && !io.out.bits.storeAddrMisaligned && !io.flush
   dmem.resp.ready := true.B
   
@@ -641,7 +678,7 @@ class lsu_for_atom extends NutCoreModule with HasLSUConst {
 
 class pipeline_lsu_atom extends NutCoreModule with HasLSUConst {
   val io = IO(new new_SIMD_LSU_IO)
-  val (valid, src1, src2, src3, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2, io.in.bits.src3, io.in.bits.func)
+  val (valid, src1, src2,src3, func) = (io.in.valid, io.in.bits.src1, io.in.bits.src2,  io.in.bits.src3, io.in.bits.func)
   def access(valid: Bool, src1: UInt, src2: UInt, func: UInt): UInt = {
     this.valid := valid
     this.src1 := src1
@@ -650,12 +687,18 @@ class pipeline_lsu_atom extends NutCoreModule with HasLSUConst {
     this.func := func
     io.out.bits
   }
+  val (vrdata,vwdata) = (io.vrdata,io.vwdata)
+  def v_access(vwdata: UInt): UInt = {
+    this.vwdata := vwdata
+    vrdata
+  }
+
   val stage1 = Module(new pipeline_lsu_stage1)
   val stage2 = Module(new pipeline_lsu_stage2)
   val stage_empty = Module(new pipeline_lsu_empty_stage)
   val atomstage = Module(new lsu_for_atom)
 
-  val atomReq = LSUOpType.isAtom(func)
+  val atomReq = LSUOpType.isAtom(func) && !io.DecodeIn.ctrl.rfVector
 
   val stage2_exp = WireInit(false.B)
 
@@ -673,8 +716,9 @@ class pipeline_lsu_atom extends NutCoreModule with HasLSUConst {
   stage1.io.in.bits.func  := func
   stage1.io.in.bits.wdata := io.wdata
   stage1.io.in.bits.Decode:= io.DecodeIn
+  stage1.io.in.bits.vwdata:= vwdata
 
-  atomstage.io.in.valid := valid && atomReq && !stage2.io.in.valid
+  atomstage.io.in.valid := valid && atomReq && !stage2.io.in.valid && !stage2_exp && !stage_empty_exp
   atomstage.io.flush    := io.flush
   atomstage.io.in.bits  := 0.U.asTypeOf(new SIMD_Pipelsu_Bundle)
   atomstage.io.in.bits.src1  := src1
@@ -722,11 +766,14 @@ class pipeline_lsu_atom extends NutCoreModule with HasLSUConst {
     io.out.bits := stage_empty.io.out.bits.result
     io.isMMIO   := stage_empty.io.out.bits.isMMIO
     io.DecodeOut:= stage_empty.io.out.bits.Decode
+    vrdata      := stage_empty.io.out.bits.vrdata
   }.otherwise{
     io.out.valid:= stage2.io.out.valid && !stage2_exp
     io.out.bits := stage2.io.out.bits.result
     io.isMMIO   := stage2.io.out.bits.isMMIO
     io.DecodeOut:= stage2.io.out.bits.Decode
+    vrdata      := stage2.io.out.bits.vrdata
+    //when(!stage2.io.in.valid){io.DecodeOut.InstNo := stage1.io.out.bits.Decode.InstNo}
   }
 
   when(atomstage.io.in.valid){
