@@ -59,15 +59,15 @@ class FMA_impl(ftype: FType)extends Module {
   fmulInReady := fmul._3
 
   //**********************************************************************//
-  val pipeline = Module(new PipelineReg(new FMULToFADD(ftype.expWidth, ftype.sigWidth)))
-  pipeline.io.in.bits.fp_prod := fmulResult.tofadd.fp_prod
-  pipeline.io.in.bits.inter_flags := fmulResult.tofadd.inter_flags
-  pipeline.io.flush := io.flush
-  pipeline.io.in.valid := fmulOutValid && useAdd
-  pipeline.io.out.ready := faddInReady
-  val mul2add_valid = pipeline.io.out.valid
-  val fp_prod = pipeline.io.out.bits.fp_prod
-  val inter_fflags = pipeline.io.out.bits.inter_flags
+  val pipeline_mul_add = Module(new PipelineReg(new FMULToFADD(ftype.expWidth, ftype.sigWidth)))
+  pipeline_mul_add.io.in.bits.fp_prod := fmulResult.tofadd.fp_prod
+  pipeline_mul_add.io.in.bits.inter_flags := fmulResult.tofadd.inter_flags
+  pipeline_mul_add.io.flush := io.flush
+  pipeline_mul_add.io.in.valid := fmulOutValid && useAdd
+  pipeline_mul_add.io.out.ready := faddInReady
+  val mul2add_valid = pipeline_mul_add.io.out.valid
+  val fp_prod = pipeline_mul_add.io.out.bits.fp_prod
+  val inter_fflags = pipeline_mul_add.io.out.bits.inter_flags
   //**********************************************************************//
 
   val faddInValid = !useMul && io.in.valid || mul2add_valid
@@ -81,7 +81,24 @@ class FMA_impl(ftype: FType)extends Module {
   faddOutValid := fadd._3
   faddInReady := fadd._4
 
-  io.in.ready := faddInReady & fmulInReady
+  val s_idle :: s_exec :: s_wait:: Nil = Enum(3)
+  val state = RegInit(s_idle)
+
+  when(io.flush){
+    state := s_idle
+  }.elsewhen(io.in.fire()){
+    state := s_exec
+  }.elsewhen(io.out.fire()){
+    state := s_idle
+  }.elsewhen(io.out.valid && !io.out.fire()){
+    state := s_wait
+  }.elsewhen(state === s_wait && io.out.fire()){
+    state := s_idle
+  }otherwise{
+    state := state
+  }
+
+  io.in.ready := state === s_idle
   io.out.valid := Mux(useAdd, faddOutValid, fmulOutValid)
   io.out.bits.result := Mux(useAdd, fadd._1, fmulResult.result)
   io.out.bits.fflags := Mux(useAdd, fadd._2, fmulResult.fflags)
@@ -131,22 +148,6 @@ class FMA extends Module with FMAOpType {
   dfma.io.out.ready := io.out.ready
   dfma.io.flush := io.flush
 
-//  val s_idle :: s_exec :: s_wait :: Nil = Enum(3)
-//  val state = RegInit(s_idle)
-//  when(io.flush) {
-//    state := s_idle
-//  }.elsewhen(io.in.fire) {
-//    state := s_exec
-//  }.elsewhen(io.out.fire) {
-//    state := s_idle
-//  }.elsewhen((sfma.io.out.valid || dfma.io.out.valid)) {
-//    state := s_wait
-//  }.elsewhen(state === s_wait && io.out.fire()) {
-//    state := s_idle
-//  } otherwise {
-//    state := state
-//  }
-
   val outresult = Mux(isSingle(func), box(sfma.io.out.bits.result, D), dfma.io.out.bits.result)
   val outfflags = Mux(isSingle(func), sfma.io.out.bits.fflags, dfma.io.out.bits.fflags)
 
@@ -161,3 +162,6 @@ class FMA extends Module with FMAOpType {
   //}
 }
 
+object FMA extends App {
+  emitVerilog(new FMA, Array("--target-dir", "generated"))
+}
